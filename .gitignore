@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 平台运行时数据（绝不入库：含 kanban.db、worktree、密钥）
+/data/
+*.db
+.env
+watchdog.log
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store

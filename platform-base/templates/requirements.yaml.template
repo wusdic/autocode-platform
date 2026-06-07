@@ -1,0 +1,17 @@
+# 需求双层结构模板 —— 产品委员会在 workspace/design/requirements.yaml 落地此结构。
+# 详见《01-最终设计方案.md》第 4 节。
+
+core_need: |
+  用户最核心诉求，MVP 必须满足。这是项目成败的唯一判据。
+
+extended_need: |
+  大而全 / 增强功能 / 未来版本。明确标记"可裁剪"。
+
+non_goals: |
+  明确不做的部分。
+
+acceptance_core:   # 核心验收标准，逐条可测试、可判定
+  - ...
+
+acceptance_extended:  # 扩展验收标准
+  - ...
