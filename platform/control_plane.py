@@ -43,6 +43,45 @@ class Settings:
 
 
 # --------------------------------------------------------------------------- #
+# 端口分配（落盘，控制平面重启后不重复分配、不撞已在跑的项目端口）
+# --------------------------------------------------------------------------- #
+class PortAllocator:
+    """把 project_id → port 的分配持久化到 ``{data_root}/.ports.json``。
+
+    控制平面重启后 ``next`` 从磁盘恢复，避免内存计数器归零导致端口与已在
+    运行的 Hermes gateway 冲突（对应手册阶段 13 端口注册表持久化的诉求）。
+    """
+
+    def __init__(self, data_root: str, base_port: int) -> None:
+        self._path = Path(data_root) / ".ports.json"
+        self._base = base_port
+        self._state = self._load()
+
+    def _load(self) -> dict:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {"next": self._base, "assigned": {}}
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._state, indent=2))
+
+    def allocate(self, pid: str) -> int:
+        """幂等分配：同一 pid 永远拿到同一端口。"""
+        assigned = self._state["assigned"]
+        if pid in assigned:
+            return assigned[pid]
+        port = int(self._state["next"])
+        assigned[pid] = port
+        self._state["next"] = port + 1
+        self._save()
+        return port
+
+
+# --------------------------------------------------------------------------- #
 # 项目注册表（内存实现；生产替换为 Postgres）
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -66,6 +105,37 @@ class ProjectRegistry:
 
     def __contains__(self, pid: str) -> bool:
         return pid in self._projects
+
+
+def rehydrate(registry: "ProjectRegistry", settings: Settings) -> None:
+    """控制平面启动时，从磁盘扫描已存在的项目重建注册表。
+
+    读取每个项目 ``ceo/.env`` 里的 API_SERVER_PORT / API_SERVER_KEY，使重启后
+    GET /tasks、/messages 等端点对老项目仍可用，而不必重新创建。
+    """
+    root = Path(settings.data_root)
+    if not root.exists():
+        return
+    for proj_dir in sorted(root.iterdir()):
+        env = proj_dir / ".hermes" / "profiles" / "ceo" / ".env"
+        if not (proj_dir.is_dir() and env.exists()):
+            continue
+        port, key = None, ""
+        for line in env.read_text().splitlines():
+            if line.startswith("API_SERVER_PORT="):
+                try:
+                    port = int(line.split("=", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("API_SERVER_KEY="):
+                key = line.split("=", 1)[1].strip()
+        if port is None:
+            continue
+        registry.add(Project(
+            project_id=proj_dir.name, port=port, key=key,
+            home=str(proj_dir / ".hermes"),
+            workspace=str(proj_dir / "workspace"),
+        ))
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +221,8 @@ def create_app(
     settings = settings or Settings()
     registry = registry or ProjectRegistry()
     gateway = gateway or HermesGateway(settings)
-    next_port = [settings.base_port]
+    ports = PortAllocator(settings.data_root, settings.base_port)
+    rehydrate(registry, settings)
 
     app = FastAPI(title="Auto-Coding Control Plane")
 
@@ -170,8 +241,7 @@ def create_app(
         auth(x_token)
         if body.project_id in registry:
             raise HTTPException(409, f"project '{body.project_id}' already exists")
-        port = next_port[0]
-        next_port[0] += 1
+        port = ports.allocate(body.project_id)
         project = gateway.launch(body.project_id, port)
         registry.add(project)
         return {"project_id": project.project_id, "port": project.port, "status": "ready"}

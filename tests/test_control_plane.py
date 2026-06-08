@@ -102,6 +102,31 @@ def test_change_request_creates_guardian_card(client):
     assert "--goal" in extra
 
 
+def test_port_allocator_persists_across_restart(tmp_path):
+    # 第一次分配
+    a1 = cp.PortAllocator(str(tmp_path), base_port=8650)
+    assert a1.allocate("p1") == 8650
+    assert a1.allocate("p2") == 8651
+    assert a1.allocate("p1") == 8650          # 幂等：同 pid 同端口
+    # 模拟控制平面重启：新实例从磁盘恢复 next，不撞已分配端口
+    a2 = cp.PortAllocator(str(tmp_path), base_port=8650)
+    assert a2.allocate("p3") == 8652
+    assert a2.allocate("p1") == 8650
+
+
+def test_rehydrate_restores_project_from_disk(tmp_path):
+    # 在磁盘上伪造一个已存在的项目
+    env = tmp_path / "old" / ".hermes" / "profiles" / "ceo"
+    env.mkdir(parents=True)
+    (env / ".env").write_text("API_SERVER_PORT=8655\nAPI_SERVER_KEY=secret\n")
+    settings = cp.Settings(token=TOKEN, base_port=8650, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=FakeGateway(settings))
+    c = TestClient(app)
+    # 重启后无需重新创建即可访问老项目
+    r = c.get("/api/projects/old/tasks", headers=_h())
+    assert r.status_code == 200
+
+
 def test_artifacts_lists_workspace_files(client, tmp_path):
     client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
     src = tmp_path / "p1" / "workspace" / "src"

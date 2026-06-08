@@ -91,11 +91,19 @@ for r in pm-research-a pm-research-b arch-simple arch-scale arch-security pm-syn
 done
 # 研发总监：看板+读文件，不写业务码
 hermes -p dev-lead config set toolsets "kanban,file,memory"
-# 工程师/质控：Docker backend + worktree（真沙箱）
+# 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets "kanban,terminal,file,memory"
   hermes -p "$r" config set terminal.backend docker
   hermes -p "$r" config set terminal.docker_image "python:3.11-slim"
+  # cwd 限定为本项目 workspace：Docker backend 默认只挂载 cwd，worker 看不到
+  # /data/projects 下的其它项目目录。
+  hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
+  # 显式只挂 workspace（防止默认把更大的目录挂进容器）。不同 Hermes 版本配置键
+  # 可能不同，以 `hermes config --help` 为准；写不进去也不影响上面的 cwd 限定，
+  # 故以 || true 兜底，避免键名差异中断启动。
+  hermes -p "$r" config set terminal.docker_mounts "${WORKSPACE}:${WORKSPACE}" 2>/dev/null \
+    || echo "   （提示：terminal.docker_mounts 键名因版本而异，请按 hermes config --help 核对挂载收窄）"
 done
 # 复制 base skills 快照到各 profile（只读模板）
 for d in "${HERMES_HOME}"/profiles/*/; do
@@ -123,8 +131,34 @@ API_SERVER_ENABLED=true
 API_SERVER_PORT=${BASE_PORT}
 API_SERVER_KEY=$(openssl rand -hex 16)
 EOF
-hermes -p ceo gateway install   # systemd 托管，开机自启、崩溃自重启
-hermes -p ceo gateway start
+# 不用 `hermes -p ceo gateway install`：它的 systemd 单元名只按 profile（都叫 ceo）
+# 生成，多项目会互相覆盖。改为每项目一个唯一命名的 user 级 systemd 单元，
+# 名字带 PROJECT_ID，彻底避免冲突。
+SERVICE="autocode-gw-${PROJECT_ID}"
+UNIT_DIR="${HOME}/.config/systemd/user"
+mkdir -p "${UNIT_DIR}"
+cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
+[Unit]
+Description=Autocode Hermes gateway for project ${PROJECT_ID}
+After=network.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=${HERMES_HOME}
+ExecStart=$(command -v hermes) -p ceo gateway start
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+# 让 user service 在用户未登录时也能运行（开机自启）。
+loginctl enable-linger "$USER" 2>/dev/null || true
+systemctl --user daemon-reload
+systemctl --user enable --now "${SERVICE}.service"
+# 注：若你的 Hermes 版本 `gateway start` 会自我后台化并退出，把上面 Type 改为
+# forking，或换成对应的前台运行命令（hermes gateway --help 核对）。
 
 echo "✅ 项目 ${PROJECT_ID} 就绪。CEO API 端口=${BASE_PORT}，HERMES_HOME=${HERMES_HOME}"
+echo "   systemd 单元=${SERVICE}.service（systemctl --user status ${SERVICE}）"
 echo "   API_SERVER_KEY 见 ${HERMES_HOME}/profiles/ceo/.env"
