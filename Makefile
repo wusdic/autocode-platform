@@ -1,10 +1,12 @@
-.PHONY: help install dev-install test lint-sh run
+.PHONY: help install dev-install test lint-sh check-docs ci run
 
 help:
 	@echo "make install      安装运行时依赖"
 	@echo "make dev-install  安装开发+测试依赖"
 	@echo "make test         运行单元测试"
 	@echo "make lint-sh      bash 语法检查所有 .sh"
+	@echo "make check-docs   校验手册嵌入代码块与语法"
+	@echo "make ci           本地跑全套 CI（test + lint-sh + check-docs）"
 	@echo "make run          本地启动控制平面（127.0.0.1:9000）"
 
 install:
@@ -18,6 +20,11 @@ test:
 
 lint-sh:
 	@for f in platform/*.sh scripts/*.sh; do echo "bash -n $$f"; bash -n "$$f"; done
+
+check-docs:
+	python3 scripts/check_docs.py
+
+ci: test lint-sh check-docs
 
 run:
 	PLATFORM_TOKEN="$${PLATFORM_TOKEN:-change-me}" \

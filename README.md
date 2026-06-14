@@ -1,5 +1,7 @@
 # autocode-platform
 
+[![CI](https://github.com/wusdic/autocode-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/wusdic/autocode-platform/actions/workflows/ci.yml)
+
 多项目自动编程平台——基于 Hermes Agent v0.16.0 的完整设计方案、操作手册与**可部署实现**。
 
 每个项目 = 一个独立 Hermes 实例 + 一块独立 Kanban 看板；项目内由 CEO（只沟通、不干活）
@@ -59,7 +61,13 @@ curl -s -X POST http://127.0.0.1:9000/api/projects \
 make dev-install   # 安装 fastapi/httpx/pytest 等
 make test          # 运行单元测试（含角色识别、设计闸门、端口持久化等）
 make lint-sh       # bash 语法检查
+make check-docs    # 校验手册里嵌入的代码块（防文档/代码漂移）
+make ci            # 一键跑全套（= GitHub Actions 所做）
 ```
+
+每次 push / PR 由 **GitHub Actions**（`.github/workflows/ci.yml`）自动跑 `pytest` + `bash -n` +
+手册嵌入代码块校验。`scripts/check_docs.py` 会把《02-操作手册》里 heredoc 内嵌的
+policy_plugin / control_plane / launcher / watchdog 抽出来编译，**任何文档与代码的语法漂移都会让 CI 变红**。
 
 ## 对外 API（控制平面，对应设计方案 §8）
 
