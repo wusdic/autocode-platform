@@ -57,7 +57,7 @@ curl -s -X POST http://127.0.0.1:9000/api/projects \
 
 ```bash
 make dev-install   # 安装 fastapi/httpx/pytest 等
-make test          # 运行单元测试（17 个用例）
+make test          # 运行单元测试（含角色识别、设计闸门、端口持久化等）
 make lint-sh       # bash 语法检查
 ```
 

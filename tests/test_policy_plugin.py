@@ -13,13 +13,32 @@ def test_dev_lead_blocked_from_patch():
     assert res and res["action"] == "block"
 
 
-def test_pm_research_blocked_from_write_file():
-    res = pp.enforce("write_file", {"path": "design/x.md"}, role="pm-research-a")
+def test_design_role_may_write_design_dir():
+    # 设计角色写 design/ 应放行（不是一刀切禁止）
+    assert pp.enforce("write_file", {"path": "design/PRD.md"}, role="pm-research-a") is None
+
+
+def test_design_role_blocked_from_writing_code():
+    # 但写 design/ 之外（疑似代码）应拦截
+    res = pp.enforce("write_file", {"path": "src/app.py"}, role="pm-research-a")
     assert res and res["action"] == "block"
 
 
+def test_synthesizer_can_write_approved_versions_key():
+    # 死锁修复：synthesizer 必须能写 design/approved_versions.txt 这把"开闸钥匙"
+    res = pp.enforce("write_file", {"path": "design/approved_versions.txt"},
+                     role="arch-synthesizer")
+    assert res is None
+
+
+def test_change_guardian_can_write_design_but_not_run_terminal():
+    assert pp.enforce("write_file", {"path": "design/impact.md"},
+                      role="change-guardian") is None
+    assert pp.enforce("terminal", {}, role="change-guardian")["action"] == "block"
+
+
 def test_executor_role_allowed_to_run_terminal():
-    # qa / release 是执行角色，不在 NO_EXEC_ROLES，应放行
+    # qa / release 是执行角色，不在 NO_CODE_ROLES，应放行
     assert pp.enforce("terminal", {}, role="qa") is None
     assert pp.enforce("terminal", {}, role="release") is None
 
@@ -63,6 +82,37 @@ def test_dev_worker_allowed_inside_allowed_paths(tmp_path):
     res = pp.enforce("patch", {"path": "src/crud/core.py"}, task_id="t1",
                      role="dev-worker-1", ws=str(ws))
     assert res is None
+
+
+# --- 角色识别（此前完全没覆盖，恰好是出过 bug 的路径）-----------------------
+def test_resolve_role_prefers_explicit():
+    assert pp.resolve_role("dev-worker-1", {"role": "ceo"}) == "dev-worker-1"
+
+
+def test_resolve_role_from_kwargs():
+    assert pp.resolve_role(None, {"profile": "qa"}) == "qa"
+
+
+def test_resolve_role_from_env(monkeypatch):
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setenv("HERMES_PROFILE", "release")
+    assert pp.resolve_role(None, {}) == "release"
+
+
+def test_resolve_role_does_not_use_hermes_home_basename(monkeypatch):
+    # 关键回归：HERMES_HOME 末段是 ".hermes"，绝不能被当成角色名误判为可执行
+    for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/data/projects/demo1/.hermes")
+    assert pp.resolve_role(None, {}) == ".hermes"   # 兜底值，不等于任何真实角色
+    # 因为它不在 NO_CODE_ROLES，也不以 dev-worker 开头，enforce 不会误判；
+    # 真实部署必须让 Hermes 通过 kwargs/env 提供真角色（见 resolve_role 文档）。
+
+
+def test_enforce_blocks_when_role_supplied_via_kwargs():
+    # 模拟 Hermes 通过 kwargs 传 profile=ceo 的情形
+    res = pp.enforce("terminal", {}, profile="ceo")
+    assert res and res["action"] == "block"
 
 
 def test_register_wires_pre_tool_call():

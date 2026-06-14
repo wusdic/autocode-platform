@@ -6,38 +6,79 @@
 本插件是第二层兜底：即使 toolset 漏配，也在工具调用前 block。
 
 三道闸：
-  1. 非执行角色禁止调用执行类工具（terminal / patch / write_file）。
+  1. no-code 角色禁止 *写代码/执行*（terminal / patch）；其 write_file 仅允许写
+     design/ 目录（设计文档），不得写代码。
   2. 工程师改代码前必须存在 approved design_version。
   3. 工程师只能改本 task 的 allowed_paths 内的文件。
 
-设计批准流程：change-guardian / arch-synthesizer 完成设计后，把版本号追加进
-``workspace/design/approved_versions.txt``，并为每个编码任务写
-``allowed_paths.<task_id>.txt``。这两个文件就是设计闸门的"钥匙"。
+第 1 道闸特意区分「执行/改码」与「写设计文档」：synthesizer / change-guardian
+等角色需要写 design/（含 approved_versions.txt 这把"开闸钥匙"），若把 write_file
+一刀切禁掉会造成设计闸门死锁——synthesizer 写不了 approved_versions.txt，
+dev-worker 永远无法开工。
+
+角色识别（重要）：Hermes 的 per-project HERMES_HOME 形如
+``/data/projects/{id}/.hermes``，其末段恒为 ``.hermes`` 而非角色名，**不能**用它当
+角色。正确来源优先级：hook 调用传入的显式 role/profile → kwargs → 环境变量
+``HERMES_PROFILE`` 等 → 最后才退回 HERMES_HOME 末段（仅占位）。
+具体哪个键由 Hermes 提供，请在阶段 2 实测确认（见 resolve_role）。
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-# 哪些角色禁止执行类工具（兜底，即使 toolset 漏配）
-NO_EXEC_ROLES = {
+# 不允许执行/改码的角色（兜底，即使 toolset 漏配）
+NO_CODE_ROLES = {
     "ceo", "pm-lead", "pm-critic", "arch-lead", "arch-critic",
     "change-guardian", "dev-lead",
     "pm-research-a", "pm-research-b", "pm-synthesizer",
     "arch-simple", "arch-scale", "arch-security", "arch-synthesizer",
 }
-EXEC_TOOLS = {"terminal", "patch", "write_file"}
+# 兼容旧名
+NO_EXEC_ROLES = NO_CODE_ROLES
+
+# 直接执行/改码的工具：no-code 角色一律禁止
+CODE_TOOLS = {"terminal", "patch"}
+# 写文件工具：no-code 角色仅允许写 design/；dev-worker 需过设计闸门
 WRITE_TOOLS = {"patch", "write_file"}
+# 兼容旧名（旧测试/文档引用）
+EXEC_TOOLS = {"terminal", "patch", "write_file"}
+
+DESIGN_DIR = "design"
+
+# Hermes 可能用于传递当前 profile/角色的键，按可靠性从高到低尝试。
+_ROLE_KW_KEYS = ("role", "profile", "profile_name", "agent", "agent_name")
+_ROLE_ENV_KEYS = ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT")
 
 
-def current_role() -> str:
-    """profile 名 = HERMES_HOME 末段目录名。"""
+def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str:
+    """解析当前角色名。
+
+    注意：绝不能只靠 ``Path(HERMES_HOME).name``——它恒为 ``.hermes``。
+    """
+    if explicit:
+        return explicit
+    kwargs = kwargs or {}
+    for k in _ROLE_KW_KEYS:
+        v = kwargs.get(k)
+        if v:
+            return str(v)
+    for env in _ROLE_ENV_KEYS:
+        v = os.environ.get(env)
+        if v:
+            return v
+    # 兜底：HERMES_HOME 末段（通常是 ".hermes"，并非角色名，仅占位以免崩溃）
     return Path(os.environ.get("HERMES_HOME", "")).name or "unknown"
 
 
 def workspace_dir() -> str:
     """worker 的工作目录：优先 TERMINAL_CWD，回退到当前目录。"""
     return os.environ.get("TERMINAL_CWD") or os.getcwd()
+
+
+def _under_design(target: str) -> bool:
+    t = (target or "").replace("\\", "/")
+    return t == DESIGN_DIR or t.startswith(DESIGN_DIR + "/") or f"/{DESIGN_DIR}/" in t
 
 
 def approved_designs(ws: str) -> set[str]:
@@ -57,50 +98,51 @@ def allowed_paths(ws: str, task_id: str | None) -> list[str] | None:
     return [line.strip() for line in f.read_text().splitlines() if line.strip()]
 
 
+def _block(message: str) -> dict:
+    return {"action": "block", "message": message}
+
+
 def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
     """pre_tool_call hook 主体。
 
     返回 None 放行；返回 ``{"action": "block", "message": ...}`` 拦截。
-    role / ws 参数仅用于测试注入，正常运行时从环境推断。
+    role / ws 参数仅用于测试注入；正常运行时从 kwargs/环境推断。
     """
-    role = role or current_role()
+    role = resolve_role(role, kwargs)
     args = args or {}
+    target = args.get("path", "")
 
-    # 闸门 1：非执行角色不准碰执行类工具
-    if role in NO_EXEC_ROLES and tool_name in EXEC_TOOLS:
-        return {
-            "action": "block",
-            "message": (
+    # 闸门 1：no-code 角色
+    if role in NO_CODE_ROLES:
+        if tool_name in CODE_TOOLS:
+            return _block(
                 f"Role '{role}' is not allowed to call '{tool_name}'. "
                 "Create a kanban task for an executor role instead."
-            ),
-        }
+            )
+        # write_file 仅允许写 design/（设计文档，含 approved_versions.txt）
+        if tool_name == "write_file" and target and not _under_design(target):
+            return _block(
+                f"Role '{role}' may only write under 'design/'. "
+                f"'{target}' looks like code; route it to a dev-worker task."
+            )
+        return None
 
     # 闸门 2 & 3：工程师改代码前，校验 design_version 与 allowed_paths
     if role.startswith("dev-worker") and tool_name in WRITE_TOOLS:
         ws = ws or workspace_dir()
 
-        # 必须有已批准的设计版本
         if not approved_designs(ws):
-            return {
-                "action": "block",
-                "message": (
-                    "No approved design_version found. "
-                    "Code changes require an approved design first."
-                ),
-            }
+            return _block(
+                "No approved design_version found. "
+                "Code changes require an approved design first."
+            )
 
-        # 目标文件必须在本 task 的 allowed_paths 内
-        target = args.get("path", "")
         allow = allowed_paths(ws, task_id)
         if allow is not None and target and not any(target.startswith(p) for p in allow):
-            return {
-                "action": "block",
-                "message": (
-                    f"File '{target}' is outside this task's allowed_paths. "
-                    "Do not modify files beyond your task scope."
-                ),
-            }
+            return _block(
+                f"File '{target}' is outside this task's allowed_paths. "
+                "Do not modify files beyond your task scope."
+            )
 
     return None
 

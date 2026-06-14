@@ -20,5 +20,5 @@ lint-sh:
 	@for f in platform/*.sh scripts/*.sh; do echo "bash -n $$f"; bash -n "$$f"; done
 
 run:
-	PLATFORM_TOKEN?=change-me \
+	PLATFORM_TOKEN="$${PLATFORM_TOKEN:-change-me}" \
 	python3 -m uvicorn control_plane:app --app-dir platform --host 127.0.0.1 --port 9000

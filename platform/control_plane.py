@@ -179,11 +179,20 @@ class HermesGateway:
             return r.json()
 
     def kanban(self, project: Project, *args: str) -> list | dict:
-        """执行 ``hermes kanban --board <pid> <args> --json`` 并解析输出。"""
+        """执行 ``hermes kanban --board <pid> <args> --json`` 并解析输出。
+
+        命令失败或输出非 JSON 时抛 RuntimeError，由端点转成 502，避免
+        json.loads 在错误输出上抛 JSONDecodeError 直接 500。
+        """
         env = dict(os.environ, HERMES_HOME=project.home)
         cmd = ["hermes", "kanban", "--board", project.project_id, *args]
         out = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        return json.loads(out.stdout or "[]")
+        if out.returncode != 0:
+            raise RuntimeError(f"hermes kanban failed: {out.stderr.strip() or out.stdout.strip()}")
+        try:
+            return json.loads(out.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"hermes kanban returned non-JSON: {out.stdout[:200]!r}") from exc
 
     def kanban_create(self, project: Project, title: str, assignee: str, *extra: str) -> None:
         env = dict(os.environ, HERMES_HOME=project.home)
@@ -280,7 +289,10 @@ def create_app(
     def list_tasks(pid: str, x_token: str = Header(None)):
         auth(x_token)
         project = get_project(pid)
-        return gateway.kanban(project, "list", "--json")
+        try:
+            return gateway.kanban(project, "list", "--json")
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
 
     @app.get("/api/projects/{pid}/requirements")
     def requirements(pid: str, x_token: str = Header(None)):
@@ -322,7 +334,11 @@ def create_app(
 
         def stream():
             # 最小实现：推送一次当前看板快照。生产可改为订阅 Redis 事件总线持续推送。
-            snapshot = gateway.kanban(project, "list", "--json")
+            try:
+                snapshot = gateway.kanban(project, "list", "--json")
+            except RuntimeError as exc:
+                yield f"event: error\ndata: {json.dumps(str(exc), ensure_ascii=False)}\n\n"
+                return
             yield f"event: tasks\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")

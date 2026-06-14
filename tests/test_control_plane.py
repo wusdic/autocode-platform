@@ -80,6 +80,19 @@ def test_list_tasks(client):
     assert r.status_code == 200 and r.json()[0]["id"] == "t1"
 
 
+def test_kanban_failure_returns_502(tmp_path):
+    class FailingGateway(FakeGateway):
+        def kanban(self, project, *args):
+            raise RuntimeError("hermes kanban failed: boom")
+
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=FailingGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "p1"}, headers=_h())
+    r = c.get("/api/projects/p1/tasks", headers=_h())
+    assert r.status_code == 502
+
+
 def test_requirements_absent_then_present(client, tmp_path):
     client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
     r = client.get("/api/projects/p1/requirements", headers=_h())

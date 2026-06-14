@@ -10,14 +10,25 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
   [ -d "$proj_dir" ] || continue
   pid=$(basename "$proj_dir")
   export HERMES_HOME="${proj_dir}.hermes"
-  # 找出失败/超时/卡死的任务
-  hermes kanban --board "$pid" list --status blocked --json 2>/dev/null \
-   | jq -r '.[] | select(.last_event=="gave_up" or .last_event=="timed_out") | .id' \
-   | while read -r tid; do
+
+  # 全量看板快照（一次拉取，供去重与读取原 assignee）
+  all_json=$(hermes kanban --board "$pid" list --json 2>/dev/null || echo '[]')
+
+  # 找出失败/超时/卡死的任务，连同其原 assignee 一并取出（tab 分隔）
+  echo "$all_json" \
+   | jq -r '.[] | select(.last_event=="gave_up" or .last_event=="timed_out")
+            | "\(.id)\t\(.assignee // "dev-worker-1")"' \
+   | while IFS=$'\t' read -r tid assignee; do
        [ -z "$tid" ] && continue
-       # 自动建 continuation 卡，不等用户
-       hermes kanban --board "$pid" create "Continue task ${tid}" \
-         --assignee dev-worker-1 --goal --goal-max-turns 30 || true
+       [ -z "$assignee" ] && assignee="dev-worker-1"
+       title="Continue task ${tid}"
+       # 去重：若该任务的 continuation 卡已存在则跳过，避免每分钟刷一张
+       exists=$(echo "$all_json" | jq -r --arg t "$title" \
+                  '[.[] | select(.title==$t)] | length')
+       [ "${exists:-0}" -gt 0 ] && continue
+       # 续跑卡沿用原任务的 assignee，职责不串
+       hermes kanban --board "$pid" create "$title" \
+         --assignee "$assignee" --goal --goal-max-turns 30 || true
        hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation" || true
      done
 done
