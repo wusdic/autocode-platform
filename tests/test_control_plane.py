@@ -13,6 +13,7 @@ class FakeGateway:
     def __init__(self, settings):
         self.settings = settings
         self.created = []   # 记录 kanban_create 调用
+        self.swarms = []    # 记录 swarm 调用
 
     def launch(self, pid, port):
         workspace = f"{self.settings.data_root}/{pid}/workspace"
@@ -29,6 +30,9 @@ class FakeGateway:
 
     def kanban_create(self, project, title, assignee, *extra):
         self.created.append((title, assignee, extra))
+
+    def swarm(self, project, goal, workers, verifier, synthesizer):
+        self.swarms.append((goal, workers, verifier, synthesizer))
 
 
 @pytest.fixture
@@ -47,17 +51,17 @@ def _h(token=TOKEN):
 
 
 def test_auth_rejects_bad_token(client):
-    r = client.post("/api/projects", json={"project_id": "p1"}, headers=_h("wrong"))
+    r = client.post("/api/projects", json={"project_id": "proj1"}, headers=_h("wrong"))
     assert r.status_code == 401
 
 
 def test_create_and_duplicate_project(client):
-    r = client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
+    r = client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
     assert r.status_code == 200
     body = r.json()
-    assert body["project_id"] == "p1" and body["status"] == "ready"
+    assert body["project_id"] == "proj1" and body["status"] == "ready"
     # 重复创建 → 409
-    r2 = client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
+    r2 = client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
     assert r2.status_code == 409
 
 
@@ -66,17 +70,34 @@ def test_unknown_project_returns_404(client):
     assert r.status_code == 404
 
 
+def test_invalid_project_id_rejected(client):
+    # 路径穿越 / 非法字符必须被拒
+    for bad in ["../etc", "a/b", "Bad ID", "x", "UPPER"]:
+        r = client.post("/api/projects", json={"project_id": bad}, headers=_h())
+        assert r.status_code == 400, bad
+
+
+def test_confirm_plan_creates_product_swarm(client):
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.post("/api/projects/proj1/confirm-plan", headers=_h())
+    assert r.status_code == 200
+    assert r.json()["swarm"] == "product-council"
+    goal, workers, verifier, synthesizer = client.gateway.swarms[-1]
+    assert workers == ["pm-research-a", "pm-research-b"]
+    assert verifier == "pm-critic" and synthesizer == "pm-synthesizer"
+
+
 def test_message_ceo_roundtrip(client):
-    client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    r = client.post("/api/projects/p1/messages",
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.post("/api/projects/proj1/messages",
                     json={"message": "hello"}, headers=_h())
     assert r.status_code == 200
     assert "echo: hello" in r.json()["content"]
 
 
 def test_list_tasks(client):
-    client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    r = client.get("/api/projects/p1/tasks", headers=_h())
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.get("/api/projects/proj1/tasks", headers=_h())
     assert r.status_code == 200 and r.json()[0]["id"] == "t1"
 
 
@@ -88,26 +109,26 @@ def test_kanban_failure_returns_502(tmp_path):
     settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
     app = cp.create_app(settings=settings, gateway=FailingGateway(settings))
     c = TestClient(app)
-    c.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    r = c.get("/api/projects/p1/tasks", headers=_h())
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.get("/api/projects/proj1/tasks", headers=_h())
     assert r.status_code == 502
 
 
 def test_requirements_absent_then_present(client, tmp_path):
-    client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    r = client.get("/api/projects/p1/requirements", headers=_h())
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.get("/api/projects/proj1/requirements", headers=_h())
     assert r.json()["requirements"] is None
     # 写入 requirements.yaml 后再读
-    design = tmp_path / "p1" / "workspace" / "design"
+    design = tmp_path / "proj1" / "workspace" / "design"
     design.mkdir(parents=True)
     (design / "requirements.yaml").write_text("core_need: build it\n")
-    r2 = client.get("/api/projects/p1/requirements", headers=_h())
+    r2 = client.get("/api/projects/proj1/requirements", headers=_h())
     assert "core_need" in r2.json()["requirements"]
 
 
 def test_change_request_creates_guardian_card(client):
-    client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    r = client.post("/api/projects/p1/change-requests",
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.post("/api/projects/proj1/change-requests",
                     json={"change": "支持优先级排序"}, headers=_h())
     assert r.status_code == 200
     title, assignee, extra = client.gateway.created[-1]
@@ -118,13 +139,13 @@ def test_change_request_creates_guardian_card(client):
 def test_port_allocator_persists_across_restart(tmp_path):
     # 第一次分配
     a1 = cp.PortAllocator(str(tmp_path), base_port=8650)
-    assert a1.allocate("p1") == 8650
+    assert a1.allocate("proj1") == 8650
     assert a1.allocate("p2") == 8651
-    assert a1.allocate("p1") == 8650          # 幂等：同 pid 同端口
+    assert a1.allocate("proj1") == 8650          # 幂等：同 pid 同端口
     # 模拟控制平面重启：新实例从磁盘恢复 next，不撞已分配端口
     a2 = cp.PortAllocator(str(tmp_path), base_port=8650)
     assert a2.allocate("p3") == 8652
-    assert a2.allocate("p1") == 8650
+    assert a2.allocate("proj1") == 8650
 
 
 def test_rehydrate_restores_project_from_disk(tmp_path):
@@ -141,10 +162,10 @@ def test_rehydrate_restores_project_from_disk(tmp_path):
 
 
 def test_artifacts_lists_workspace_files(client, tmp_path):
-    client.post("/api/projects", json={"project_id": "p1"}, headers=_h())
-    src = tmp_path / "p1" / "workspace" / "src"
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    src = tmp_path / "proj1" / "workspace" / "src"
     src.mkdir(parents=True)
     (src / "main.py").write_text("print('hi')\n")
-    r = client.get("/api/projects/p1/artifacts", headers=_h())
+    r = client.get("/api/projects/proj1/artifacts", headers=_h())
     paths = [a["path"] for a in r.json()["artifacts"]]
     assert "src/main.py" in paths

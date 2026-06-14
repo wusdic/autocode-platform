@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,22 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+try:
+    import fcntl  # POSIX 文件锁；非 POSIX 平台降级为无锁
+except ImportError:  # pragma: no cover
+    fcntl = None
+
+# 严格 slug：防止 project_id 路径穿越 / systemd 单元名污染。
+PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+
+
+def validate_project_id(pid: str) -> None:
+    if not PROJECT_ID_RE.match(pid or ""):
+        raise HTTPException(
+            400,
+            "invalid project_id; must match ^[a-z0-9][a-z0-9_-]{2,63}$",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -70,15 +87,29 @@ class PortAllocator:
         self._path.write_text(json.dumps(self._state, indent=2))
 
     def allocate(self, pid: str) -> int:
-        """幂等分配：同一 pid 永远拿到同一端口。"""
-        assigned = self._state["assigned"]
-        if pid in assigned:
-            return assigned[pid]
-        port = int(self._state["next"])
-        assigned[pid] = port
-        self._state["next"] = port + 1
-        self._save()
-        return port
+        """幂等分配：同一 pid 永远拿到同一端口。
+
+        每次在文件锁下重新读取最新状态再写回，保证并发建项目时不撞端口。
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(".lock")
+        with open(lock_path, "w") as lockf:
+            if fcntl is not None:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            try:
+                state = self._load()
+                assigned = state["assigned"]
+                if pid in assigned:
+                    return assigned[pid]
+                port = int(state["next"])
+                assigned[pid] = port
+                state["next"] = port + 1
+                self._path.write_text(json.dumps(state, indent=2))
+                self._state = state
+                return port
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +233,21 @@ class HermesGateway:
         ]
         subprocess.run(cmd, env=env, check=True)
 
+    def swarm(self, project: Project, goal: str, workers: list[str],
+              verifier: str, synthesizer: str) -> None:
+        """显式创建设计委员会 swarm（fan-out + critic + synthesizer）。
+
+        对应设计方案 §5/§7：编排由平台显式发起，不依赖 CEO 自觉。
+        """
+        env = dict(os.environ, HERMES_HOME=project.home)
+        cmd = [
+            "hermes", "kanban", "--board", project.project_id, "swarm", goal,
+            "--workers", ",".join(workers),
+            "--verifier", verifier,
+            "--synthesizer", synthesizer,
+        ]
+        subprocess.run(cmd, env=env, check=True)
+
 
 # --------------------------------------------------------------------------- #
 # 请求体模型
@@ -248,6 +294,7 @@ def create_app(
     @app.post("/api/projects")
     def create_project(body: CreateProject, x_token: str = Header(None)):
         auth(x_token)
+        validate_project_id(body.project_id)
         if body.project_id in registry:
             raise HTTPException(409, f"project '{body.project_id}' already exists")
         port = ports.allocate(body.project_id)
@@ -265,12 +312,22 @@ def create_app(
     async def confirm_plan(pid: str, x_token: str = Header(None)):
         auth(x_token)
         project = get_project(pid)
-        # 用户确认方案 → 通知 CEO 启动设计委员会与构建流水线（见手册阶段 7/8）。
-        return await gateway.chat(
+        # 显式编排：平台直接创建产品委员会 swarm，而非只 prompt CEO（见手册阶段 7）。
+        # 架构委员会在 PRD 产出后由 dispatcher / change-guardian 衔接。
+        gateway.swarm(
             project,
-            "用户已确认需求双层结构，请启动设计委员会并推进到 core_need 达成。",
+            goal="产出 PRD：基于 workspace/design/requirements.yaml 的 core_need",
+            workers=["pm-research-a", "pm-research-b"],
+            verifier="pm-critic",
+            synthesizer="pm-synthesizer",
+        )
+        # 同时通知 CEO 跟进推进到 core_need 达成。
+        reply = await gateway.chat(
+            project,
+            "用户已确认需求双层结构，产品委员会 swarm 已启动；请跟进设计与构建直至 core_need 达成。",
             "main",
         )
+        return {"status": "plan-confirmed", "swarm": "product-council", "ceo": reply}
 
     @app.post("/api/projects/{pid}/change-requests")
     def change_request(pid: str, body: ChangeRequest, x_token: str = Header(None)):

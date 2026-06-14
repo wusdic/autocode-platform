@@ -44,6 +44,11 @@ WRITE_TOOLS = {"patch", "write_file"}
 # 兼容旧名（旧测试/文档引用）
 EXEC_TOOLS = {"terminal", "patch", "write_file"}
 
+# 可执行/改码的具名角色（dev-worker-* 另按前缀判断）
+EXECUTOR_ROLES = {"qa", "release"}
+# 敏感工具：角色识别不出时，对这些一律 fail-closed 拒绝
+SENSITIVE_TOOLS = {"terminal", "patch", "write_file"}
+
 DESIGN_DIR = "design"
 
 # Hermes 可能用于传递当前 profile/角色的键，按可靠性从高到低尝试。
@@ -102,15 +107,29 @@ def _block(message: str) -> dict:
     return {"action": "block", "message": message}
 
 
+def is_known_role(role: str) -> bool:
+    return role in NO_CODE_ROLES or role in EXECUTOR_ROLES or role.startswith("dev-worker")
+
+
 def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
     """pre_tool_call hook 主体。
 
     返回 None 放行；返回 ``{"action": "block", "message": ...}`` 拦截。
     role / ws 参数仅用于测试注入；正常运行时从 kwargs/环境推断。
+
+    设计为 **fail-closed**：角色识别不出时拒绝一切敏感工具，避免因
+    Hermes 未按预期暴露 profile 而默默放行（防 fail-open）。
     """
     role = resolve_role(role, kwargs)
     args = args or {}
     target = args.get("path", "")
+
+    # 失败即关闭：识别不出角色 → 敏感工具一律拒绝
+    if not is_known_role(role) and tool_name in SENSITIVE_TOOLS:
+        return _block(
+            f"Cannot determine caller role (got '{role}'); refusing '{tool_name}'. "
+            "Ensure Hermes passes the profile to the hook (see resolve_role)."
+        )
 
     # 闸门 1：no-code 角色
     if role in NO_CODE_ROLES:
@@ -127,22 +146,32 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
             )
         return None
 
-    # 闸门 2 & 3：工程师改代码前，校验 design_version 与 allowed_paths
-    if role.startswith("dev-worker") and tool_name in WRITE_TOOLS:
+    # 闸门 2 & 3：工程师
+    if role.startswith("dev-worker"):
         ws = ws or workspace_dir()
+        approved = approved_designs(ws)
 
-        if not approved_designs(ws):
+        # 无批准设计：不准改码，也不准用 terminal 执行（terminal 同样能写文件，
+        # 否则可绕过设计闸门）。
+        if tool_name in (WRITE_TOOLS | {"terminal"}) and not approved:
             return _block(
                 "No approved design_version found. "
-                "Code changes require an approved design first."
+                "Code changes (incl. terminal) require an approved design first."
             )
 
-        allow = allowed_paths(ws, task_id)
-        if allow is not None and target and not any(target.startswith(p) for p in allow):
-            return _block(
-                f"File '{target}' is outside this task's allowed_paths. "
-                "Do not modify files beyond your task scope."
-            )
+        # 改文件：必须有显式 allowed_paths（绑定合法 task id）——fail-closed。
+        if tool_name in WRITE_TOOLS:
+            allow = allowed_paths(ws, task_id)
+            if allow is None:
+                return _block(
+                    f"No 'design/allowed_paths.{task_id}.txt' for this task. "
+                    "Declare the file scope before writing code."
+                )
+            if target and not any(target.startswith(p) for p in allow):
+                return _block(
+                    f"File '{target}' is outside this task's allowed_paths. "
+                    "Do not modify files beyond your task scope."
+                )
 
     return None
 

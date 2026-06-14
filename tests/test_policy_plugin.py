@@ -60,12 +60,33 @@ def _ws_with_approved(tmp_path):
     return ws
 
 
-def test_dev_worker_allowed_when_no_allowed_paths_file(tmp_path):
-    # 有批准版本、但没有 allowed_paths 文件 => 未约束，放行
+def test_dev_worker_blocked_when_no_allowed_paths_file(tmp_path):
+    # fail-closed：有批准版本但缺 allowed_paths 文件 => 拒绝（必须先声明范围）
     ws = _ws_with_approved(tmp_path)
     res = pp.enforce("patch", {"path": "src/a.py"}, task_id="t1",
                      role="dev-worker-1", ws=str(ws))
-    assert res is None
+    assert res and "allowed_paths" in res["message"]
+
+
+def test_dev_worker_terminal_blocked_without_approved_design(tmp_path):
+    # terminal 也能写文件，无批准设计时一并拦截（防绕过设计闸门）
+    ws = tmp_path
+    (ws / "design").mkdir()
+    res = pp.enforce("terminal", {}, task_id="t1", role="dev-worker-1", ws=str(ws))
+    assert res and "approved design" in res["message"]
+
+
+def test_dev_worker_terminal_allowed_with_approved_design(tmp_path):
+    ws = _ws_with_approved(tmp_path)
+    assert pp.enforce("terminal", {}, task_id="t1",
+                      role="dev-worker-1", ws=str(ws)) is None
+
+
+def test_unknown_role_fails_closed_on_sensitive_tools():
+    # 角色识别不出（如兜底的 ".hermes"/"unknown"）→ 敏感工具一律拒绝
+    for bad in (".hermes", "unknown", ""):
+        assert pp.enforce("write_file", {"path": "design/x.md"}, role=bad)["action"] == "block"
+        assert pp.enforce("terminal", {}, role=bad)["action"] == "block"
 
 
 def test_dev_worker_blocked_outside_allowed_paths(tmp_path):
