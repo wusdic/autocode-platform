@@ -31,10 +31,17 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        [ "${exists:-0}" -gt 0 ] && continue
        # 续跑卡：沿用原 assignee 与 workspace，并在正文指明续接的原任务
        extra=(--assignee "$assignee" --idempotency-key "watchdog-continue-${tid}"
-              --goal --goal-max-turns 30
+              --goal --goal-max-turns 30 --json
               --body "Continuation of task ${tid} (watchdog). Inherit its context, workspace and remaining scope.")
        [ -n "$workspace" ] && extra+=(--workspace "$workspace")
-       hermes kanban --board "$pid" create "$title" "${extra[@]}" || true
-       hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation" || true
+       new_tid=$(hermes kanban --board "$pid" create "$title" "${extra[@]}" 2>/dev/null \
+                   | jq -r '.id // empty')
+       # 关键：续跑卡是新 task id，没有自己的 allowed_paths 文件会被 fail-closed 设计闸门
+       # 拦死。把原任务的 allowed_paths 复制给新 id，避免 watchdog 触发新死锁。
+       dsg="${proj_dir}workspace/design"
+       if [ -n "${new_tid}" ] && [ -f "${dsg}/allowed_paths.${tid}.txt" ]; then
+         cp "${dsg}/allowed_paths.${tid}.txt" "${dsg}/allowed_paths.${new_tid}.txt" 2>/dev/null || true
+       fi
+       hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation ${new_tid}" || true
      done
 done

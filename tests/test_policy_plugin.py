@@ -120,6 +120,16 @@ def test_resolve_role_from_env(monkeypatch):
     assert pp.resolve_role(None, {}) == "release"
 
 
+def test_resolve_role_from_profiles_path_segment(monkeypatch):
+    # 真机运行时的文档化布局：HERMES_HOME=…/profiles/<role> → 应解析出 <role>
+    for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/data/projects/demo1/.hermes/profiles/dev-worker-1")
+    assert pp.resolve_role(None, {}) == "dev-worker-1"
+    monkeypatch.setenv("HERMES_HOME", "/data/projects/demo1/.hermes/profiles/ceo")
+    assert pp.resolve_role(None, {}) == "ceo"
+
+
 def test_resolve_role_does_not_use_hermes_home_basename(monkeypatch):
     # 关键回归：HERMES_HOME 末段是 ".hermes"，绝不能被当成角色名误判为可执行
     for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):

@@ -77,8 +77,17 @@ def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str
         v = os.environ.get(env)
         if v:
             return v
-    # 兜底：HERMES_HOME 末段（通常是 ".hermes"，并非角色名，仅占位以免崩溃）
-    return Path(os.environ.get("HERMES_HOME", "")).name or "unknown"
+    # 回退：从 HERMES_HOME 解析。标准布局是 ``…/profiles/<name>``，所以优先取
+    # ``profiles`` 段后的那一节（比纯 basename 更稳，能容忍尾部多一层目录）；
+    # 找不到 profiles 段时退回末段（项目级 ``…/.hermes`` 会得到 ".hermes"，
+    # 非已知角色 → enforce() fail-closed）。
+    home = os.environ.get("HERMES_HOME", "")
+    parts = Path(home).parts
+    if "profiles" in parts:
+        i = parts.index("profiles")
+        if i + 1 < len(parts):
+            return parts[i + 1]
+    return Path(home).name or "unknown"
 
 
 def workspace_dir() -> str:
