@@ -87,6 +87,16 @@ def test_confirm_plan_creates_product_swarm(client):
     assert verifier == "pm-critic" and synthesizer == "pm-synthesizer"
 
 
+def test_confirm_plan_persists_requirements(client, tmp_path):
+    # 闭环验证：confirm-plan 带 requirements → 落盘，GET /requirements 能读到
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.post("/api/projects/proj1/confirm-plan", headers=_h(),
+                    json={"requirements": "core_need: build a CLI todo\n"})
+    assert r.status_code == 200
+    got = client.get("/api/projects/proj1/requirements", headers=_h())
+    assert "core_need" in (got.json()["requirements"] or "")
+
+
 def test_message_ceo_roundtrip(client):
     client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
     r = client.post("/api/projects/proj1/messages",

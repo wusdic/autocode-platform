@@ -265,6 +265,13 @@ class ChangeRequest(BaseModel):
     change: str
 
 
+class ConfirmPlan(BaseModel):
+    # 用户在 Step 5 与 CEO 对齐后的需求双层结构（YAML 文本）。控制平面据此落盘
+    # workspace/design/requirements.yaml —— 闭合"谁来写 requirements.yaml"的链路：
+    # CEO 无 file 工具集写不了，产品委员会 swarm 又以它为输入，必须由网关持久化。
+    requirements: Optional[str] = None
+
+
 # --------------------------------------------------------------------------- #
 # App 工厂
 # --------------------------------------------------------------------------- #
@@ -309,14 +316,21 @@ def create_app(
         return await gateway.chat(project, body.message, body.session_id)
 
     @app.post("/api/projects/{pid}/confirm-plan")
-    async def confirm_plan(pid: str, x_token: str = Header(None)):
+    async def confirm_plan(pid: str, body: Optional[ConfirmPlan] = None,
+                           x_token: str = Header(None)):
         auth(x_token)
         project = get_project(pid)
+        # 闭环：先把用户确认的需求双层结构落盘为 requirements.yaml（CEO 无 file 工具，
+        # 写不了；产品委员会 swarm 又以它为输入），再启动 swarm。
+        if body and body.requirements:
+            design_dir = Path(project.workspace) / "design"
+            design_dir.mkdir(parents=True, exist_ok=True)
+            (design_dir / "requirements.yaml").write_text(body.requirements)
         # 显式编排：平台直接创建产品委员会 swarm，而非只 prompt CEO（见手册阶段 7）。
         # 架构委员会在 PRD 产出后由 dispatcher / change-guardian 衔接。
         gateway.swarm(
             project,
-            goal="产出 PRD：基于 workspace/design/requirements.yaml 的 core_need",
+            goal="产出 PRD：基于 design/requirements.yaml 的 core_need",
             workers=["pm-research-a", "pm-research-b"],
             verifier="pm-critic",
             synthesizer="pm-synthesizer",

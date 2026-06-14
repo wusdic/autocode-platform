@@ -27,16 +27,18 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        # 去重：用官方 --idempotency-key 保证同一卡死任务只生成一张续跑卡
        # （比按标题匹配更可靠）；title 去重作为二次保险保留。
        exists=$(echo "$all_json" | jq -r --arg t "$title" \
-                  '[.[] | select(.title==$t)] | length')
+                  '[.[] | select(.title==$t)] | length' 2>/dev/null || echo 0)
        [ "${exists:-0}" -gt 0 ] && continue
        # 续跑卡：沿用原 assignee 与 workspace，并在正文指明续接的原任务
        extra=(--assignee "$assignee" --idempotency-key "watchdog-continue-${tid}"
               --goal --goal-max-turns 30 --json
               --body "Continuation of task ${tid} (watchdog). Inherit its context, workspace and remaining scope.")
        [ -n "$workspace" ] && extra+=(--workspace "$workspace")
-       # 不吞 stderr：创建失败时把错误留在日志里（问题D 可观测性）
-       create_out=$(hermes kanban --board "$pid" create "$title" "${extra[@]}" 2>&1)
-       new_tid=$(printf '%s' "$create_out" | jq -r '.id // empty' 2>/dev/null)
+       # 不吞 stderr：创建失败时把错误留在日志里（问题D 可观测性）。
+       # 关键：必须 `|| true`，否则 set -e 会在 create 失败时中止整个 while 循环，
+       # 连下面的容错日志都执行不到，且跳过其余卡死任务。
+       create_out=$(hermes kanban --board "$pid" create "$title" "${extra[@]}" 2>&1) || true
+       new_tid=$(printf '%s' "$create_out" | jq -r '.id // empty' 2>/dev/null || true)
        if [ -z "${new_tid}" ]; then
          echo "$(date -Is) [warn] project ${pid}: 续跑卡创建未返回 id（下个 tick 会因 idempotency-key 重试）；输出：${create_out}"
          continue
