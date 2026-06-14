@@ -12,6 +12,7 @@
 
 - **[01-最终设计方案.md](01-最终设计方案.md)**：完整架构设计，包含五条底层原则、三层隔离模型、13 个角色权限表、需求双层结构、设计委员会多模型质疑机制、先设计再执行的双层硬拦、90 轮问题处理、风险规避表。
 - **[02-从零开始操作手册.md](02-从零开始操作手册.md)**：13 个阶段可逐条执行的操作手册。
+- **[03-本地全流程部署与验证手册.md](03-本地全流程部署与验证手册.md)**：在真实 Ubuntu 主机上从零部署、跑通一个 demo 项目并验证六项端到端目标的 step-by-step（含目的/命令/预期输出/打勾、🧑‍💻 需你介入处、监测告警部署）。
 
 ## 仓库结构
 
@@ -21,6 +22,8 @@ platform/
   policy_plugin.py      第二层权限硬拦（pre_tool_call hook 三道闸）
   launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway
   watchdog.sh           处理 90 轮预算 / 崩溃 / 超时，自动建 continuation 卡
+  monitor.sh            健康监测 + 告警：gateway 存活/卡死堆积/权限漂移/日志/磁盘
+  hook_canary.sh        每小时探测设计闸门 hook 是否仍在 kanban-worker 路径生效
 platform-base/
   templates/            AGENTS.md（全局约束）+ 各角色 SOUL.*.md + requirements.yaml 模板
   skills/               跨项目复用的 skill 快照（占位）
