@@ -16,11 +16,13 @@
 一刀切禁掉会造成设计闸门死锁——synthesizer 写不了 approved_versions.txt，
 dev-worker 永远无法开工。
 
-角色识别（重要）：Hermes 的 per-project HERMES_HOME 形如
-``/data/projects/{id}/.hermes``，其末段恒为 ``.hermes`` 而非角色名，**不能**用它当
-角色。正确来源优先级：hook 调用传入的显式 role/profile → kwargs → 环境变量
-``HERMES_PROFILE`` 等 → 最后才退回 HERMES_HOME 末段（仅占位）。
-具体哪个键由 Hermes 提供，请在阶段 2 实测确认（见 resolve_role）。
+角色识别：据官方文档，**每个 profile 有独立的 HERMES_HOME**，形如
+``<base>/.hermes/profiles/<name>``，运行某 profile 时 ``HERMES_HOME`` 会被设到该子目录，
+故 ``Path(HERMES_HOME).name`` 通常 == profile 名（这是文档化的当前 profile 信号，
+因为并不存在 ``HERMES_PROFILE`` 环境变量）。resolve_role 仍优先用 hook kwargs/环境变量，
+再回退到 HERMES_HOME 末段——后者在标准布局下可靠。
+⚠️ 唯一需在真实环境确认的：本平台用「每项目自定义 HERMES_HOME 基目录」时，
+dispatcher spawn worker 是否仍把 HERMES_HOME 设为 ``<base>/.hermes/profiles/<role>``。
 """
 from __future__ import annotations
 
@@ -59,7 +61,10 @@ _ROLE_ENV_KEYS = ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT")
 def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str:
     """解析当前角色名。
 
-    注意：绝不能只靠 ``Path(HERMES_HOME).name``——它恒为 ``.hermes``。
+    优先 hook 显式参数 / kwargs / 环境变量；再回退到 ``Path(HERMES_HOME).name``——
+    据官方文档，每个 profile 有独立 HERMES_HOME（``…/profiles/<name>``），故该末段
+    通常即 profile 名，是可靠回退。仍保留 fail-closed：若最终拿到的不是已知角色，
+    enforce() 会拒绝敏感工具。
     """
     if explicit:
         return explicit

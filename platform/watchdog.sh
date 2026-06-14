@@ -24,12 +24,14 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        [ -z "$tid" ] && continue
        [ -z "$assignee" ] && assignee="dev-worker-1"
        title="Continue task ${tid}"
-       # 去重：若该任务的 continuation 卡已存在则跳过，避免每分钟刷一张
+       # 去重：用官方 --idempotency-key 保证同一卡死任务只生成一张续跑卡
+       # （比按标题匹配更可靠）；title 去重作为二次保险保留。
        exists=$(echo "$all_json" | jq -r --arg t "$title" \
                   '[.[] | select(.title==$t)] | length')
        [ "${exists:-0}" -gt 0 ] && continue
        # 续跑卡：沿用原 assignee 与 workspace，并在正文指明续接的原任务
-       extra=(--assignee "$assignee" --goal --goal-max-turns 30
+       extra=(--assignee "$assignee" --idempotency-key "watchdog-continue-${tid}"
+              --goal --goal-max-turns 30
               --body "Continuation of task ${tid} (watchdog). Inherit its context, workspace and remaining scope.")
        [ -n "$workspace" ] && extra+=(--workspace "$workspace")
        hermes kanban --board "$pid" create "$title" "${extra[@]}" || true
