@@ -26,7 +26,8 @@
 | profile = 独立 HERMES_HOME（`…/.hermes/profiles/<name>`） | ✅ | profiles.md（运行某 profile 时 HERMES_HOME 设到该子目录） |
 | profile **不是** 沙箱（local backend 有完整文件权限） | ✅ | profiles.md |
 | 不存在 `HERMES_PROFILE` 环境变量 | ✅ | profiles.md（当前 profile 靠 HERMES_HOME 体现） |
-| **自定义 base HERMES_HOME 下，dispatcher 是否把 worker HERMES_HOME 设到 `<base>/.hermes/profiles/<role>`** | ⚠️ | **平台最大不确定点**；由《03》Step 8 第 5 项实测；不成立时 fail-closed 兜底 |
+| **自定义 base HERMES_HOME 下，dispatcher 是否把 worker HERMES_HOME 设到 `<base>/.hermes/profiles/<role>`** | ⚠️🔴 | **平台最大不确定点（角色识别）**；由《03》Step 8 第 5 项实测；不成立时 fail-closed 兜底 |
+| **pre_tool_call hook 是否能拿到当前 kanban 卡 `task_id`**（经参数或环境） | ⚠️🔴 | **平台第二大不确定点（第三道闸命门）**：拿不到 task_id → allowed_paths 查不到 → fail-closed 全锁，dev-worker 写不了任何代码。`resolve_task_id()` 已多探 kwargs+env 几个来源降风险；仍须真机验证（《03》Step 8-5 的放行半场会暴露此问题） |
 
 ## C. 配置键
 | 键 | 状态 | 来源 / 备注 |

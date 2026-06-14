@@ -34,12 +34,17 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
               --goal --goal-max-turns 30 --json
               --body "Continuation of task ${tid} (watchdog). Inherit its context, workspace and remaining scope.")
        [ -n "$workspace" ] && extra+=(--workspace "$workspace")
-       new_tid=$(hermes kanban --board "$pid" create "$title" "${extra[@]}" 2>/dev/null \
-                   | jq -r '.id // empty')
+       # 不吞 stderr：创建失败时把错误留在日志里（问题D 可观测性）
+       create_out=$(hermes kanban --board "$pid" create "$title" "${extra[@]}" 2>&1)
+       new_tid=$(printf '%s' "$create_out" | jq -r '.id // empty' 2>/dev/null)
+       if [ -z "${new_tid}" ]; then
+         echo "$(date -Is) [warn] project ${pid}: 续跑卡创建未返回 id（下个 tick 会因 idempotency-key 重试）；输出：${create_out}"
+         continue
+       fi
        # 关键：续跑卡是新 task id，没有自己的 allowed_paths 文件会被 fail-closed 设计闸门
        # 拦死。把原任务的 allowed_paths 复制给新 id，避免 watchdog 触发新死锁。
        dsg="${proj_dir}workspace/design"
-       if [ -n "${new_tid}" ] && [ -f "${dsg}/allowed_paths.${tid}.txt" ]; then
+       if [ -f "${dsg}/allowed_paths.${tid}.txt" ]; then
          cp "${dsg}/allowed_paths.${tid}.txt" "${dsg}/allowed_paths.${new_tid}.txt" 2>/dev/null || true
        fi
        hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation ${new_tid}" || true

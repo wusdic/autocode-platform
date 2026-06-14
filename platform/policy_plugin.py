@@ -56,6 +56,10 @@ DESIGN_DIR = "design"
 # Hermes 可能用于传递当前 profile/角色的键，按可靠性从高到低尝试。
 _ROLE_KW_KEYS = ("role", "profile", "profile_name", "agent", "agent_name")
 _ROLE_ENV_KEYS = ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT")
+# 当前 kanban 卡 id 可能的来源：hook kwargs 优先，其次环境变量（dispatcher 已知会
+# 给子进程设 HERMES_KANBAN_BOARD，task id 也可能经类似 env 提供）。
+_TASK_KW_KEYS = ("task_id", "task", "kanban_task_id", "card_id")
+_TASK_ENV_KEYS = ("HERMES_KANBAN_TASK", "HERMES_KANBAN_TASK_ID", "HERMES_TASK_ID")
 
 
 def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str:
@@ -83,9 +87,10 @@ def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str
     # 非已知角色 → enforce() fail-closed）。
     home = os.environ.get("HERMES_HOME", "")
     parts = Path(home).parts
-    if "profiles" in parts:
-        i = parts.index("profiles")
-        if i + 1 < len(parts):
+    # 标准布局 <base>/.hermes/profiles/<role>：锚定到 ".hermes" 之后的 profiles 段，
+    # 避免项目名恰好叫 "profiles" 时 index() 取到错误位置（问题B）。
+    for i in range(len(parts) - 1):
+        if parts[i] == "profiles" and i > 0 and parts[i - 1].endswith(".hermes"):
             return parts[i + 1]
     return Path(home).name or "unknown"
 
@@ -95,9 +100,44 @@ def workspace_dir() -> str:
     return os.environ.get("TERMINAL_CWD") or os.getcwd()
 
 
+def resolve_task_id(explicit=None, kwargs=None):
+    """解析当前 kanban 卡 id：hook 显式参数 → kwargs → 环境变量。
+
+    ⚠️ 这是平台第二大不确定点（问题A）：若 Hermes 的 pre_tool_call 既不经参数也不经
+    环境传 task id，则第三道闸（allowed_paths）拿不到 id，会 fail-closed。必须真机验证
+    （见《03》Step 8-5 与验证矩阵 B 节）。这里多探几个可能的来源以尽量降低"全锁"风险。
+    """
+    if explicit:
+        return explicit
+    kwargs = kwargs or {}
+    for k in _TASK_KW_KEYS:
+        if kwargs.get(k):
+            return str(kwargs[k])
+    for env in _TASK_ENV_KEYS:
+        if os.environ.get(env):
+            return os.environ[env]
+    return None
+
+
 def _under_design(target: str) -> bool:
     t = (target or "").replace("\\", "/")
     return t == DESIGN_DIR or t.startswith(DESIGN_DIR + "/") or f"/{DESIGN_DIR}/" in t
+
+
+def _path_allowed(target: str, allow: list[str]) -> bool:
+    """带目录边界的前缀匹配（问题C）：``src/crud`` 不应放行 ``src/crud_secret.py``。
+
+    每条 allow 视为"精确文件"或"目录前缀"：target 命中当且仅当 ``target == p``
+    或 ``target`` 以 ``p`` + ``/`` 开头（p 去掉尾部斜杠后）。
+    """
+    t = (target or "").replace("\\", "/")
+    for p in allow:
+        p = p.replace("\\", "/").rstrip("/")
+        if not p:
+            continue
+        if t == p or t.startswith(p + "/"):
+            return True
+    return False
 
 
 def approved_designs(ws: str) -> set[str]:
@@ -175,13 +215,14 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
 
         # 改文件：必须有显式 allowed_paths（绑定合法 task id）——fail-closed。
         if tool_name in WRITE_TOOLS:
-            allow = allowed_paths(ws, task_id)
+            tid = resolve_task_id(task_id, kwargs)
+            allow = allowed_paths(ws, tid)
             if allow is None:
                 return _block(
-                    f"No 'design/allowed_paths.{task_id}.txt' for this task. "
+                    f"No 'design/allowed_paths.{tid}.txt' for this task (task_id={tid}). "
                     "Declare the file scope before writing code."
                 )
-            if target and not any(target.startswith(p) for p in allow):
+            if target and not _path_allowed(target, allow):
                 return _block(
                     f"File '{target}' is outside this task's allowed_paths. "
                     "Do not modify files beyond your task scope."

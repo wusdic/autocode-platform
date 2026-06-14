@@ -105,6 +105,61 @@ def test_dev_worker_allowed_inside_allowed_paths(tmp_path):
     assert res is None
 
 
+# --- 问题C：allowed_paths 目录边界，前缀不应跨目录名误匹配 -------------------
+def test_allowed_paths_directory_boundary(tmp_path):
+    ws = _ws_with_approved(tmp_path)
+    # 注意：故意不带尾斜杠，模拟 dev-lead 漏写 '/' 的情况
+    (ws / "design" / "allowed_paths.t1.txt").write_text("src/crud\n")
+    # src/crud_secret.py 不在 src/crud/ 下，必须拦截
+    blocked = pp.enforce("write_file", {"path": "src/crud_secret.py"}, task_id="t1",
+                         role="dev-worker-1", ws=str(ws))
+    assert blocked and "allowed_paths" in blocked["message"]
+    # src/crud/x.py 在目录内，放行
+    assert pp.enforce("write_file", {"path": "src/crud/x.py"}, task_id="t1",
+                      role="dev-worker-1", ws=str(ws)) is None
+    # 精确文件条目也应放行该文件本身
+    (ws / "design" / "allowed_paths.t2.txt").write_text("src/main.py\n")
+    assert pp.enforce("write_file", {"path": "src/main.py"}, task_id="t2",
+                      role="dev-worker-1", ws=str(ws)) is None
+
+
+# --- 问题A：task_id 解析（kwargs / env 回退），缺失即 fail-closed ------------
+def test_resolve_task_id_prefers_explicit_then_kwargs_then_env(monkeypatch):
+    assert pp.resolve_task_id("t9", {"task_id": "tX"}) == "t9"
+    assert pp.resolve_task_id(None, {"kanban_task_id": "tK"}) == "tK"
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_TASK_ID", "HERMES_TASK_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "tEnv")
+    assert pp.resolve_task_id(None, {}) == "tEnv"
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    assert pp.resolve_task_id(None, {}) is None
+
+
+def test_dev_worker_write_uses_task_id_from_kwargs(tmp_path):
+    # hook 不经位置参数传 task_id，而是放在 kwargs（模拟 Hermes 真实可能形态）
+    ws = _ws_with_approved(tmp_path)
+    (ws / "design" / "allowed_paths.tK.txt").write_text("src/crud/\n")
+    res = pp.enforce("write_file", {"path": "src/crud/x.py"},
+                     role="dev-worker-1", ws=str(ws), kanban_task_id="tK")
+    assert res is None
+
+
+def test_dev_worker_blocked_when_task_id_missing(tmp_path):
+    # 拿不到 task_id（第三道闸命门）→ fail-closed
+    ws = _ws_with_approved(tmp_path)
+    res = pp.enforce("write_file", {"path": "src/crud/x.py"},
+                     role="dev-worker-1", ws=str(ws))
+    assert res and "allowed_paths" in res["message"]
+
+
+def test_resolve_role_project_named_profiles(monkeypatch):
+    # 问题B：项目 id 恰好叫 profiles，不能误取第一段
+    for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/data/projects/profiles/.hermes/profiles/ceo")
+    assert pp.resolve_role(None, {}) == "ceo"
+
+
 # --- 角色识别（此前完全没覆盖，恰好是出过 bug 的路径）-----------------------
 def test_resolve_role_prefers_explicit():
     assert pp.resolve_role("dev-worker-1", {"role": "ceo"}) == "dev-worker-1"
