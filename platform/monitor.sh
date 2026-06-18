@@ -51,11 +51,12 @@ check_stuck() {     # ② 卡死/失败任务堆积
   fi
 }
 
-check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 terminal
+check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 code_execution
   local pid="$1" home="$2" dis
-  dis=$(HERMES_HOME="${home}" hermes -p ceo config get agent.disabled_toolsets 2>/dev/null || echo "")
-  if ! printf '%s' "${dis}" | grep -q "terminal"; then
-    notify CRIT "project ${pid}: CEO 的 agent.disabled_toolsets 不含 terminal——第一层权限被改动！"
+  # v0.16 没有 `config get`，只有 `config show`（NEW-F）。
+  dis=$(HERMES_HOME="${home}" hermes -p ceo config show 2>/dev/null | grep -A5 disabled_toolsets || echo "")
+  if ! printf '%s' "${dis}" | grep -q "code_execution"; then
+    notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 code_execution——第一层权限被改动！"
   fi
 }
 

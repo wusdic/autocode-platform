@@ -47,9 +47,24 @@ def validate_project_id(pid: str) -> None:
 # --------------------------------------------------------------------------- #
 # 配置
 # --------------------------------------------------------------------------- #
+def _default_token() -> str:
+    """PLATFORM_TOKEN：环境变量 → ~/platform/.platform_token 文件 → change-me。
+
+    Hermes 的密钥脱敏会阻止把 token 写进脚本文件传递（NEW-H），故支持文件 fallback；
+    生产用 systemd 的 Environment= 固定，避免重启后回落 change-me 致 401（26.3）。
+    """
+    env = os.environ.get("PLATFORM_TOKEN")
+    if env:
+        return env
+    p = os.path.expanduser("~/platform/.platform_token")
+    if os.path.exists(p):
+        return open(p).read().strip()
+    return "change-me"
+
+
 @dataclass
 class Settings:
-    token: str = field(default_factory=lambda: os.environ.get("PLATFORM_TOKEN", "change-me"))
+    token: str = field(default_factory=_default_token)
     base_port: int = field(default_factory=lambda: int(os.environ.get("PLATFORM_BASE_PORT", "8650")))
     data_root: str = field(default_factory=lambda: os.environ.get("PLATFORM_DATA_ROOT", "/data/projects"))
     launcher: str = field(
@@ -240,12 +255,11 @@ class HermesGateway:
         对应设计方案 §5/§7：编排由平台显式发起，不依赖 CEO 自觉。
         """
         env = dict(os.environ, HERMES_HOME=project.home)
-        cmd = [
-            "hermes", "kanban", "--board", project.project_id, "swarm", goal,
-            "--workers", ",".join(workers),
-            "--verifier", verifier,
-            "--synthesizer", synthesizer,
-        ]
+        # Hermes v0.16：`--worker`（单数，可重复，PROFILE:TITLE 格式），不是 `--workers`。
+        cmd = ["hermes", "kanban", "--board", project.project_id, "swarm", goal]
+        for w in workers:
+            cmd += ["--worker", f"{w}:{w}"]
+        cmd += ["--verifier", verifier, "--synthesizer", synthesizer]
         subprocess.run(cmd, env=env, check=True)
 
 

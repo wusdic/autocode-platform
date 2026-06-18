@@ -64,10 +64,10 @@ create_role release           "anthropic/claude-sonnet-4.6"      "Merges/package
 create_role change-guardian   "anthropic/claude-opus-4.6"        "Change impact analysis and design gate."
 
 echo "==> [4/6] 裁剪 toolset（第一层权限）+ 注入 SOUL/AGENTS"
-# CEO：只能沟通+看板，无 terminal/file/patch
-hermes -p ceo config set toolsets "clarify,kanban,memory,messaging"
-# 文档化硬抑制兜底：无论 allowlist 是否生效，CEO 都拿不到这些工具集
-hermes -p ceo config set agent.disabled_toolsets "terminal,file,patch,web,browser"
+# CEO：只能沟通+看板。v0.16 配置值用 JSON 数组；toolsets 是"附加列表"不限制内置工具，
+# 真正的第一层权限是 agent.disabled_toolsets（必须含 code_execution，否则 CEO 能直接写码）。
+hermes -p ceo config set toolsets '["clarify","kanban","memory","messaging"]'
+hermes -p ceo config set agent.disabled_toolsets '["code_execution","terminal","file"]'
 # 注入各角色 SOUL（模板存在才复制）
 inject_soul () {
   local role="$1"
@@ -84,32 +84,31 @@ for r in dev-worker-1 dev-worker-2; do
   tpl="${PLATFORM_BASE}/templates/SOUL.dev-worker.md"
   [ -f "${tpl}" ] && cp "${tpl}" "${HERMES_HOME}/profiles/${r}/SOUL.md" 2>/dev/null || true
 done
-# 设计角色：看板+只写 design，无 terminal/patch
+# 设计角色：看板+只写 design（JSON 数组格式）
 for r in pm-lead pm-critic arch-lead arch-critic change-guardian; do
-  hermes -p "$r" config set toolsets "kanban,file,web,memory"
+  hermes -p "$r" config set toolsets '["kanban","file","web","memory"]'
 done
 for r in pm-research-a pm-research-b arch-simple arch-scale arch-security pm-synthesizer arch-synthesizer; do
-  hermes -p "$r" config set toolsets "web,file,memory"
+  hermes -p "$r" config set toolsets '["web","file","memory"]'
 done
 # 研发总监：看板+读文件，不写业务码
-hermes -p dev-lead config set toolsets "kanban,file,memory"
-# 文档化的硬抑制（denylist）：官方 `agent.disabled_toolsets` 跨 CLI 与所有 gateway
-# 平台移除指定工具集，是比 allowlist 更确定的第一层保证。即便上面的 `toolsets`
-# allowlist 键名因版本不符，这一步也兜底保证 no-code 角色拿不到执行/改码工具。
+hermes -p dev-lead config set toolsets '["kanban","file","memory"]'
+# 真正的第一层硬抑制：agent.disabled_toolsets（JSON 数组），移除 code_execution + terminal，
+# 保证 no-code 角色拿不到执行/改码工具（patch 由第二层 policy 插件兜底）。
 for r in pm-lead pm-critic arch-lead arch-critic change-guardian dev-lead \
          pm-research-a pm-research-b arch-simple arch-scale arch-security \
          pm-synthesizer arch-synthesizer; do
-  hermes -p "$r" config set agent.disabled_toolsets "terminal,patch"
+  hermes -p "$r" config set agent.disabled_toolsets '["code_execution","terminal"]'
 done
 # 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
 for r in dev-worker-1 dev-worker-2 qa release; do
-  hermes -p "$r" config set toolsets "kanban,terminal,file,memory"
+  hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
   hermes -p "$r" config set terminal.backend docker
   hermes -p "$r" config set terminal.docker_image "python:3.11-slim"
   # cwd 限定为本项目 workspace（gateway/cron 工作目录）。
   hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
-  # 只挂本项目 workspace：官方配置键是 terminal.docker_volumes，用标准 docker -v 语法。
-  hermes -p "$r" config set terminal.docker_volumes "${WORKSPACE}:${WORKSPACE}"
+  # 只挂本项目 workspace。v0.16 期望 JSON 数组（bare string 会 ValueError）。
+  hermes -p "$r" config set terminal.docker_volumes "[\"${WORKSPACE}:${WORKSPACE}\"]"
 done
 # 复制 base skills 快照到各 profile（只读模板）
 for d in "${HERMES_HOME}"/profiles/*/; do
@@ -126,6 +125,8 @@ cat > "${HERMES_HOME}/plugins/policy/plugin.yaml" <<EOF
 name: policy
 description: Role permission and design-gate enforcement
 EOF
+# 关键：仅复制文件 Hermes 不会加载插件，必须显式 enable，否则第二层设计闸门全程缺席。
+HERMES_HOME="${HERMES_HOME}" hermes plugins enable policy
 
 echo "==> [6/6] 配置 Kanban + API server，启动 gateway（内嵌 dispatcher）"
 hermes config set kanban.dispatch_in_gateway true
@@ -151,7 +152,7 @@ After=network.target
 [Service]
 Type=simple
 Environment=HERMES_HOME=${HERMES_HOME}
-ExecStart=$(command -v hermes) -p ceo gateway start
+ExecStart=$(command -v hermes) -p ceo gateway run
 Restart=on-failure
 RestartSec=3
 
@@ -162,8 +163,8 @@ EOF
 loginctl enable-linger "$USER" 2>/dev/null || true
 systemctl --user daemon-reload
 systemctl --user enable --now "${SERVICE}.service"
-# 注：若你的 Hermes 版本 `gateway start` 会自我后台化并退出，把上面 Type 改为
-# forking，或换成对应的前台运行命令（hermes gateway --help 核对）。
+# 用 `gateway run`（前台模式），故 Type=simple 正确——systemd 直接托管该前台进程。
+# （`gateway start` 需先 `gateway install` 的机器级服务，项目独立 HERMES_HOME 下不存在。）
 
 echo "✅ 项目 ${PROJECT_ID} 就绪。CEO API 端口=${BASE_PORT}，HERMES_HOME=${HERMES_HOME}"
 echo "   systemd 单元=${SERVICE}.service（systemctl --user status ${SERVICE}）"
