@@ -22,12 +22,12 @@ export HERMES_HOME="${PROOT}/.hermes"
 WORKSPACE="${PROOT}/workspace"
 
 # ── 模型供应商配置（全部可用环境变量覆盖；默认双供应商交叉质疑）─────────────
-# 报告实测：z.ai 账号模型清单未必含 glm-5.2，故默认用已验证可用的 glm-5.1，可经
-# 环境变量显式改成 glm-5.2 等。绝不把不可用模型写死进仓库。
+# 两个大模型：GLM-5.2（默认）+ DeepSeek。zai 角色用 glm-5.2，跨供应商质疑角色用 deepseek。
+# 若你的 z.ai 账号无 glm-5.2，用环境变量改：ZAI_PRIMARY_MODEL / ZAI_SECONDARY_MODEL。
 ZAI_PROVIDER="${ZAI_PROVIDER:-zai}"
 ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}"
-ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL:-glm-5.1}"      # 决策/编码
-ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL:-glm-5.1}"  # 研究/综合
+ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL:-glm-5.2}"      # 默认模型：决策/编码
+ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL:-glm-5.2}"  # 研究/综合
 DEEPSEEK_PROVIDER="${DEEPSEEK_PROVIDER:-deepseek}"
 DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
 DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"      # 批判/验收（跨供应商质疑）
