@@ -208,12 +208,15 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
                 f"Role '{role}' is not allowed to call '{tool_name}'. "
                 "Create a kanban task for an executor role instead."
             )
-        # write_file 仅允许写 design/（设计文档，含 approved_versions.txt）
-        if tool_name == "write_file" and target and not _under_design(target):
-            return _block(
-                f"Role '{role}' may only write under 'design/'. "
-                f"'{target}' looks like code; route it to a dev-worker task."
-            )
+        # write_file 仅允许写 design/（设计文档，含 approved_versions.txt）。
+        # 先规范化路径（堵 design/../ 越界），再判断是否在 design/ 内。
+        if tool_name == "write_file" and target:
+            rel, err = normalize_target(ws or workspace_dir(), target)
+            if err or not _under_design(rel or ""):
+                return _block(
+                    f"Role '{role}' may only write under 'design/'. "
+                    f"'{target}' is outside design/; route code to a dev-worker task."
+                )
         return None
 
     # QA / release：可执行（terminal 跑测试/构建），但写文件范围受限，不得改业务代码。

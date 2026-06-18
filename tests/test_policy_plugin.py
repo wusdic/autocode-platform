@@ -24,6 +24,14 @@ def test_design_role_blocked_from_writing_code():
     assert res and res["action"] == "block"
 
 
+def test_design_role_escape_via_dotdot_blocked(tmp_path):
+    # design/../src/evil.py 规范化后落在 design/ 外，必须拦截
+    (tmp_path / "design").mkdir()
+    res = pp.enforce("write_file", {"path": "design/../src/evil.py"},
+                     role="pm-research-a", ws=str(tmp_path))
+    assert res and res["action"] == "block"
+
+
 def test_synthesizer_can_write_approved_versions_key():
     # 死锁修复：synthesizer 必须能写 design/approved_versions.txt 这把"开闸钥匙"
     res = pp.enforce("write_file", {"path": "design/approved_versions.txt"},

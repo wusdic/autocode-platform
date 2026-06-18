@@ -33,6 +33,7 @@
 | 键 | 状态 | 来源 / 备注 |
 |---|---|---|
 | `model.default` | ✅ | configuration.md |
+| `model.provider` / `model.base_url`（跨供应商路由） | ✅ | **真机实测**：不设则错误模型名被发给默认供应商而失败；设了 zai/deepseek 各自路由成功 |
 | `agent.max_turns`（默认 90） | ✅ | configuration.md 逐字 |
 | `terminal.cwd` | ✅ | configuration.md |
 | `terminal.backend`（值 `docker` 合法） | ✅ | configuration.md（六种 backend） |
