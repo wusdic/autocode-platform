@@ -87,6 +87,32 @@ def test_confirm_plan_creates_product_swarm(client):
     assert verifier == "pm-critic" and synthesizer == "pm-synthesizer"
 
 
+def test_architecture_swarm_endpoint(client):
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = client.post("/api/projects/proj1/architecture-swarm", headers=_h())
+    assert r.status_code == 200 and r.json()["swarm"] == "architecture-council"
+    _, workers, verifier, synthesizer = client.gateway.swarms[-1]
+    assert workers == ["arch-simple", "arch-scale", "arch-security"]
+    assert verifier == "arch-critic" and synthesizer == "arch-synthesizer"
+
+
+def test_swarm_cmd_uses_singular_worker_flag(monkeypatch, tmp_path):
+    """回归 NEW-E：真实 HermesGateway.swarm 必须用单数可重复 --worker。"""
+    calls = {}
+
+    def fake_run(cmd, env=None, check=False, **kw):
+        calls["cmd"] = list(cmd)
+
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+    gw = cp.HermesGateway(cp.Settings(data_root=str(tmp_path)))
+    proj = cp.Project("proj1", 8650, "k", str(tmp_path / ".hermes"), str(tmp_path / "ws"))
+    gw.swarm(proj, "goal", ["pm-research-a", "pm-research-b"], "pm-critic", "pm-synthesizer")
+    cmd = calls["cmd"]
+    assert "--workers" not in cmd
+    assert cmd.count("--worker") == 2
+    assert "pm-research-a:pm-research-a" in cmd and "pm-research-b:pm-research-b" in cmd
+
+
 def test_confirm_plan_persists_requirements(client, tmp_path):
     # 闭环验证：confirm-plan 带 requirements → 落盘，GET /requirements 能读到
     client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())

@@ -48,6 +48,9 @@ EXEC_TOOLS = {"terminal", "patch", "write_file"}
 
 # 可执行/改码的具名角色（dev-worker-* 另按前缀判断）
 EXECUTOR_ROLES = {"qa", "release"}
+# QA 只能写测试/报告，release 只能写产物——不得改业务代码（设计 §3.2 职责边界）。
+QA_WRITE_PREFIXES = ["tests", "test", "reports/qa", "coverage"]
+RELEASE_WRITE_PREFIXES = ["dist", "release", "reports/release"]
 # 敏感工具：角色识别不出时，对这些一律 fail-closed 拒绝
 SENSITIVE_TOOLS = {"terminal", "patch", "write_file"}
 
@@ -122,6 +125,19 @@ def resolve_task_id(explicit=None, kwargs=None):
 def _under_design(target: str) -> bool:
     t = (target or "").replace("\\", "/")
     return t == DESIGN_DIR or t.startswith(DESIGN_DIR + "/") or f"/{DESIGN_DIR}/" in t
+
+
+def normalize_target(ws: str, target: str):
+    """把目标路径规范化为相对 workspace 的 posix 路径；越界（绝对路径外/.. 逃逸/
+    symlink 逃逸）返回 (None, 原因)。供路径白名单判断前统一收口。"""
+    try:
+        root = Path(ws).resolve()
+        raw = Path(target or "")
+        candidate = raw if raw.is_absolute() else root / raw
+        rel = candidate.resolve().relative_to(root).as_posix()
+        return rel, None
+    except (OSError, ValueError):
+        return None, f"target '{target}' is outside workspace"
 
 
 def _path_allowed(target: str, allow: list[str]) -> bool:
@@ -200,6 +216,18 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
             )
         return None
 
+    # QA / release：可执行（terminal 跑测试/构建），但写文件范围受限，不得改业务代码。
+    if role in EXECUTOR_ROLES and tool_name in WRITE_TOOLS:
+        ws = ws or workspace_dir()
+        rel, err = normalize_target(ws, target)
+        prefixes = QA_WRITE_PREFIXES if role == "qa" else RELEASE_WRITE_PREFIXES
+        if err or (rel and not _path_allowed(rel, prefixes)):
+            return _block(
+                f"Role '{role}' may only write under {prefixes}; "
+                "business code changes must go to a dev-worker task."
+            )
+        return None
+
     # 闸门 2 & 3：工程师
     if role.startswith("dev-worker"):
         ws = ws or workspace_dir()
@@ -222,7 +250,11 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
                     f"No 'design/allowed_paths.{tid}.txt' for this task (task_id={tid}). "
                     "Declare the file scope before writing code."
                 )
-            if target and not _path_allowed(target, allow):
+            # 先规范化（堵绝对路径越界 / .. / symlink 逃逸），再做白名单匹配。
+            rel, err = normalize_target(ws, target)
+            if err:
+                return _block(err)
+            if rel and not _path_allowed(rel, allow):
                 return _block(
                     f"File '{target}' is outside this task's allowed_paths. "
                     "Do not modify files beyond your task scope."

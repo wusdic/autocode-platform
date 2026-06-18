@@ -10,7 +10,7 @@
 | `hermes kanban boards create <slug> --name --description --icon --switch` | ✅ | kanban.md 官方示例 |
 | `hermes kanban create "<t>" --assignee <p> --json` | ✅ | kanban.md 官方示例 |
 | `--idempotency-key` | ✅ | kanban.md 官方示例（watchdog/canary 用它去重） |
-| `hermes kanban swarm "<goal>" --workers a,b --verifier c --synthesizer d` | ✅ | kanban.md：建 root/blackboard + N worker + gated verifier + gated synthesizer |
+| `hermes kanban swarm "<goal>" --worker PROFILE:TITLE --verifier c --synthesizer d` | ✅ | **真机实测修正**：单数、可重复 `--worker`（格式 `PROFILE:TITLE`）；复数 `--workers` 不存在（NEW-E）|
 | workspace 种类 `scratch / worktree:<p> / dir:<p>` | ✅ | kanban.md |
 | 每 board 独立 `kanban.db` + dispatcher 设 `HERMES_KANBAN_BOARD` | ✅ | kanban.md |
 | dispatcher 内嵌 gateway、60s tick | ✅ | kanban.md |
@@ -37,14 +37,15 @@
 | `terminal.cwd` | ✅ | configuration.md |
 | `terminal.backend`（值 `docker` 合法） | ✅ | configuration.md（六种 backend） |
 | `terminal.docker_image` | ✅ | configuration.md |
-| `terminal.docker_volumes`（docker `-v` 语法） | ✅ | configuration.md（**曾误用 docker_mounts，已修**） |
+| `terminal.docker_volumes`（**JSON 数组** `["host:container"]`）| ✅ | **真机实测修正**：非 bare string、非 YAML list，必须 JSON 数组，否则容器启动 ValueError（NEW-M）|
 | `agent.disabled_toolsets`（denylist，跨 CLI+gateway） | ✅ | configuration.md（第一层权限的确定保证） |
-| `toolsets` allowlist（`config set toolsets "a,b"`） | ⚠️ | 逗号集已确认；**allowlist 这个键本身待核对**，故已加 disabled_toolsets 兜底 |
+| `toolsets`（**附加列表，非白名单**）| ✅ | **真机实测修正**：内置 `code_execution/terminal/file` 始终可用，必须用 `agent.disabled_toolsets` 显式禁用；值用 JSON 数组（NEW-K/L）|
 
 ## D. Hooks / 插件
 | 用法 | 状态 | 来源 / 备注 |
 |---|---|---|
-| `pre_tool_call` 可在工具执行前 block | ✅ | hooks.md |
+| `pre_tool_call` 可在工具执行前 block | ✅ | hooks.md（需 `HERMES_ACCEPT_HOOKS=1` 在非交互/gateway 路径接受 hook）|
+| 插件复制到 `plugins/<name>/` 后**必须** `hermes plugins enable <name>` 才加载 | ✅ | **真机实测（NEW-O）**：仅复制不 enable → hook 整条流水线缺席 |
 | Python 插件 `register(ctx)` + `ctx.register_hook(...)` | ✅ | hooks.md（Python 先注册，优先于 shell hook） |
 | **pre_tool_call 在 kanban-worker 路径是否可靠触发** | ⚠️🔴 | **issue #25204**：shell pre_tool_call 在 kanban-worker `chat -q` 不可靠（v0.13）；我们用 Python 插件更稳，但必须实测（Step 8-5 + hook_canary.sh 持续监测） |
 | 相关已知 bug | — | #2817（部分 hook 文档有却不触发）、#12922（post_tool_call 不覆盖内置工具） |
@@ -60,7 +61,7 @@
 | `hermes gateway install/start/status`、`--all` | ✅ | cli-commands.md（systemd/launchd） |
 | `gateway install` 的单元是**单个机器级 `hermes-gateway.service`** | ✅ | cli-commands.md；故我们改用每项目唯一命名 user 单元，隔离性待真机确认 |
 
-## F. 已知设计限制（reviewer 提出且成立，留作后续）
-- **架构委员会 swarm 未由代码触发**：`confirm-plan` 只显式建**产品**委员会 swarm；架构 swarm 目前依赖 dispatcher/change-guardian 衔接，未做"PRD 完成→自动起架构 swarm"的门控编排。正解：监听产品 synthesizer 卡完成事件后由控制平面起架构 swarm（需事件流，属阶段 13）。
+## F. 已知设计限制
+- **架构委员会 swarm 触发**：✅ 已用代码闭合——`POST /architecture-swarm` 端点 + `watchdog.sh`"PRD 在、ADR 不在则自动起"兜底（marker 去重）。完整事件驱动（监听 synthesizer 卡 done）仍属阶段 13。
+- **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
-- **systemd `Type=simple` vs `gateway start` 是否自后台化**：未知；若自 daemon 化需改 `Type=forking`，已在脚本注释标注，待真机核对。

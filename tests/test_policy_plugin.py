@@ -152,6 +152,37 @@ def test_dev_worker_blocked_when_task_id_missing(tmp_path):
     assert res and "allowed_paths" in res["message"]
 
 
+def test_qa_may_write_tests_not_business_code(tmp_path):
+    (tmp_path / "tests").mkdir()
+    assert pp.enforce("write_file", {"path": "tests/test_x.py"},
+                      role="qa", ws=str(tmp_path)) is None
+    blocked = pp.enforce("write_file", {"path": "src/main.py"},
+                         role="qa", ws=str(tmp_path))
+    assert blocked and "may only write" in blocked["message"]
+
+
+def test_release_may_write_dist_not_code(tmp_path):
+    assert pp.enforce("write_file", {"path": "dist/pkg.whl"},
+                      role="release", ws=str(tmp_path)) is None
+    blocked = pp.enforce("patch", {"path": "src/main.py"},
+                         role="release", ws=str(tmp_path))
+    assert blocked and "may only write" in blocked["message"]
+
+
+def test_qa_terminal_still_allowed(tmp_path):
+    # qa 需要 terminal 跑测试（terminal 不是 WRITE_TOOLS）
+    assert pp.enforce("terminal", {}, role="qa", ws=str(tmp_path)) is None
+
+
+def test_dev_worker_path_escape_blocked(tmp_path):
+    ws = _ws_with_approved(tmp_path)
+    (ws / "design" / "allowed_paths.t1.txt").write_text("src/\n")
+    # ../ 逃逸到 workspace 外应被拦
+    res = pp.enforce("write_file", {"path": "../../etc/passwd"}, task_id="t1",
+                     role="dev-worker-1", ws=str(ws))
+    assert res and res["action"] == "block"
+
+
 def test_resolve_role_project_named_profiles(monkeypatch):
     # 问题B：项目 id 恰好叫 profiles，不能误取第一段
     for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):

@@ -53,17 +53,34 @@ check_stuck() {     # ② 卡死/失败任务堆积
 
 check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 code_execution
   local pid="$1" home="$2" dis
-  # v0.16 没有 `config get`，只有 `config show`（NEW-F）。
+  # v0.16 无 get 子命令，改用 config show（NEW-F）。
   dis=$(HERMES_HOME="${home}" hermes -p ceo config show 2>/dev/null | grep -A5 disabled_toolsets || echo "")
   if ! printf '%s' "${dis}" | grep -q "code_execution"; then
     notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 code_execution——第一层权限被改动！"
   fi
 }
 
-check_logs() {      # ④ Hermes 崩溃迹象
-  local pid="$1" home="$2" logf="${home}/gateway.log"
+check_logs() {      # ④ Hermes 崩溃迹象（文件日志 + journald，因 gateway 由 systemd 托管）
+  local pid="$1" home="$2" logf="${home}/gateway.log" jlog
   if [ -f "${logf}" ] && tail -n 500 "${logf}" 2>/dev/null | grep -Eq "Traceback|CRITICAL|panic"; then
     notify WARN "project ${pid}: gateway.log 近期出现 Traceback/CRITICAL，请排查"
+  fi
+  jlog=$(journalctl --user -u "autocode-gw-${pid}.service" -n 500 --no-pager 2>/dev/null || echo "")
+  printf '%s' "${jlog}" | grep -Eq "Traceback|CRITICAL|panic" \
+    && notify WARN "project ${pid}: gateway journal 近期出现 Traceback/CRITICAL"
+  # 供应商错误分级：1113/余额耗尽（持续，需充值）→ CRIT；1305/临时过载（自恢复）→ WARN
+  printf '%s' "${jlog}" | grep -Eq "1113|Insufficient balance|no resource package" \
+    && notify CRIT "project ${pid}: 模型供应商余额耗尽，相关角色将无法工作（需充值）"
+  printf '%s' "${jlog}" | grep -Eq "1305|temporarily overloaded" \
+    && notify WARN "project ${pid}: 模型供应商临时过载，观察是否自动恢复"
+}
+
+check_root_files() {  # ⑥ Docker 以 root 写的产物宿主用户读不了 → 归还属主并告警
+  local pid="$1" ws="${2}workspace"
+  if [ -d "${ws}" ] && find "${ws}" ! -user "$(id -un)" -print -quit 2>/dev/null | grep -q .; then
+    chown -R "$(id -un)":"$(id -gn)" "${ws}" 2>/dev/null \
+      && notify WARN "project ${pid}: workspace 出现非当前用户文件（Docker root 写入），已尝试归还属主" \
+      || notify WARN "project ${pid}: workspace 有 root 文件且 chown 失败，需手动处理"
   fi
 }
 
@@ -86,6 +103,7 @@ main() {
     check_stuck "${pid}" "${home}"
     check_first_layer "${pid}" "${home}"
     check_logs "${pid}" "${home}"
+    check_root_files "${pid}" "${proj_dir}"
   done
 }
 

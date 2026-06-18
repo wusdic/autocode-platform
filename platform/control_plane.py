@@ -255,7 +255,7 @@ class HermesGateway:
         对应设计方案 §5/§7：编排由平台显式发起，不依赖 CEO 自觉。
         """
         env = dict(os.environ, HERMES_HOME=project.home)
-        # Hermes v0.16：`--worker`（单数，可重复，PROFILE:TITLE 格式），不是 `--workers`。
+        # Hermes v0.16：单数、可重复的 worker flag，格式 PROFILE:TITLE（非复数逗号串）。
         cmd = ["hermes", "kanban", "--board", project.project_id, "swarm", goal]
         for w in workers:
             cmd += ["--worker", f"{w}:{w}"]
@@ -356,6 +356,24 @@ def create_app(
             "main",
         )
         return {"status": "plan-confirmed", "swarm": "product-council", "ceo": reply}
+
+    @app.post("/api/projects/{pid}/architecture-swarm")
+    def architecture_swarm(pid: str, x_token: str = Header(None)):
+        """产品委员会产出 PRD 后，显式起架构委员会 swarm（闭合 KNOWN-04）。
+
+        生产应由 orchestrator/事件流在 pm-synthesizer 卡 done 后自动调用；
+        watchdog 也有"PRD 在、ADR 不在则自动起"的兜底（见 watchdog.sh）。
+        """
+        auth(x_token)
+        project = get_project(pid)
+        gateway.swarm(
+            project,
+            goal="产出 ADR + interface-spec + code-spec + TODO：基于 design/PRD.md",
+            workers=["arch-simple", "arch-scale", "arch-security"],
+            verifier="arch-critic",
+            synthesizer="arch-synthesizer",
+        )
+        return {"status": "architecture-swarm-started", "swarm": "architecture-council"}
 
     @app.post("/api/projects/{pid}/change-requests")
     def change_request(pid: str, body: ChangeRequest, x_token: str = Header(None)):

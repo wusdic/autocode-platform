@@ -31,12 +31,49 @@ echo "==> 创建控制平面 venv 并安装依赖"
 python3 -m venv "${PLATFORM_HOME}/venv"
 "${PLATFORM_HOME}/venv/bin/pip" install -r "${REPO_ROOT}/requirements.txt"
 
+echo "==> 构建非 root 沙箱镜像（产物属主正确，避免 Docker root 写文件）"
+if command -v docker >/dev/null 2>&1; then
+  docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
+    -t "${SANDBOX_IMAGE:-autocode-python:3.11-local}" \
+    -f "${REPO_ROOT}/docker/python-sandbox.Dockerfile" "${REPO_ROOT}" \
+    || echo "   （镜像构建失败，launcher 会回退到 python:3.11-slim）"
+fi
+
+echo "==> 安装控制平面 systemd 服务（持久 + Restart + 固定 token/PATH/XDG）"
+CP_TOKEN="$(openssl rand -hex 16)"
+printf '%s\n' "${CP_TOKEN}" > "${PLATFORM_HOME}/.platform_token"
+printf 'PLATFORM_TOKEN=%s\nPLATFORM_DATA_ROOT=%s\n' "${CP_TOKEN}" "${PLATFORM_DATA_ROOT}" \
+  > "${PLATFORM_HOME}/.platform_token.env"
+chmod 600 "${PLATFORM_HOME}/.platform_token" "${PLATFORM_HOME}/.platform_token.env"
+HERMES_BIN_DIR="$(dirname "$(command -v hermes 2>/dev/null || echo /usr/bin/hermes)")"
+UNIT_DIR="${HOME}/.config/systemd/user"; mkdir -p "${UNIT_DIR}"
+cat > "${UNIT_DIR}/autocode-control-plane.service" <<UNIT
+[Unit]
+Description=Autocode control plane (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${PLATFORM_HOME}
+EnvironmentFile=${PLATFORM_HOME}/.platform_token.env
+Environment=XDG_RUNTIME_DIR=%t
+Environment=PATH=${HERMES_BIN_DIR}:${PLATFORM_HOME}/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=${PLATFORM_HOME}/venv/bin/uvicorn control_plane:app --app-dir ${PLATFORM_HOME} --host 127.0.0.1 --port 9000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+UNIT
+loginctl enable-linger "$USER" 2>/dev/null || true
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+systemctl --user daemon-reload
+systemctl --user enable --now autocode-control-plane.service || true
+
 cat <<NEXT
 
-✅ 部署完成。启动控制平面：
-  PLATFORM_TOKEN="\$(openssl rand -hex 16)" \\
-  ${PLATFORM_HOME}/venv/bin/uvicorn control_plane:app \\
-    --app-dir ${PLATFORM_HOME} --host 127.0.0.1 --port 9000
-
-然后按操作手册阶段 5 创建第一个项目。
+✅ 部署完成。控制平面已作为 systemd 服务运行在 127.0.0.1:9000。
+   PLATFORM_TOKEN 见 ${PLATFORM_HOME}/.platform_token
+   状态：systemctl --user status autocode-control-plane.service
+然后按操作手册阶段 5 创建第一个项目（请求头带 X-Token: <上面的 token>）。
 NEXT

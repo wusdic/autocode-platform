@@ -51,4 +51,18 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        fi
        hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation ${new_tid}" || true
      done
+
+  # KNOWN-04 自动衔接：产品委员会出了 PRD 但还没 ADR → 自动起架构委员会 swarm。
+  # 用 marker 文件去重，PRD 产出后只触发一次（正解是监听 synthesizer 卡 done 事件，阶段13）。
+  design="${proj_dir}workspace/design"
+  if [ -f "${design}/PRD.md" ] && [ ! -f "${design}/ADR.md" ] \
+     && [ ! -f "${design}/.arch_swarm_started" ]; then
+    if hermes kanban --board "$pid" swarm "产出 ADR+interface-spec+code-spec+TODO：基于 design/PRD.md" \
+         --worker arch-simple:arch-simple --worker arch-scale:arch-scale \
+         --worker arch-security:arch-security \
+         --verifier arch-critic --synthesizer arch-synthesizer 2>/dev/null; then
+      touch "${design}/.arch_swarm_started"
+      echo "$(date -Is) [info] project ${pid}: 已自动启动架构委员会 swarm（PRD→ADR）"
+    fi
+  fi
 done

@@ -21,6 +21,25 @@ PROOT="${PLATFORM_DATA_ROOT}/${PROJECT_ID}"
 export HERMES_HOME="${PROOT}/.hermes"
 WORKSPACE="${PROOT}/workspace"
 
+# ── 模型供应商配置（全部可用环境变量覆盖；默认双供应商交叉质疑）─────────────
+# 报告实测：z.ai 账号模型清单未必含 glm-5.2，故默认用已验证可用的 glm-5.1，可经
+# 环境变量显式改成 glm-5.2 等。绝不把不可用模型写死进仓库。
+ZAI_PROVIDER="${ZAI_PROVIDER:-zai}"
+ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}"
+ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL:-glm-5.1}"      # 决策/编码
+ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL:-glm-5.1}"  # 研究/综合
+DEEPSEEK_PROVIDER="${DEEPSEEK_PROVIDER:-deepseek}"
+DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
+DEEPSEEK_MODEL="${DEEPSEEK_MODEL:-deepseek-chat}"      # 批判/验收（跨供应商质疑）
+
+# 供应商 key 早校验：缺则早失败，而非跑到一半才报 401/余额。key 放 ~/.hermes/.env。
+# 用其它供应商时，用 REQUIRE_PROVIDER_KEYS 覆盖（空字符串则跳过校验）。
+REQUIRE_PROVIDER_KEYS="${REQUIRE_PROVIDER_KEYS-GLM_API_KEY DEEPSEEK_API_KEY}"
+_has_key() { [ -n "${!1:-}" ] || grep -q "^$1=" "$HOME/.hermes/.env" 2>/dev/null; }
+for _k in ${REQUIRE_PROVIDER_KEYS}; do
+  _has_key "$_k" || { echo "❌ 缺少供应商 key: ${_k}（写入 ~/.hermes/.env 或导出环境变量）"; exit 1; }
+done
+
 mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 
 echo "==> [1/6] 创建独立 Hermes 实例目录 ${HERMES_HOME}"
@@ -31,37 +50,40 @@ hermes kanban boards create "${PROJECT_ID}" \
   --name "${PROJECT_ID}" --description "auto-coding project ${PROJECT_ID}" --switch
 
 echo "==> [3/6] 创建角色 profiles + 模型/描述"
-# 不同角色配不同模型，实现多模型质疑。模型字符串按你的供应商替换。
-create_role () {
-  local name="$1" model="$2" desc="$3"
+# 不同角色配不同模型/不同供应商，实现跨模型质疑。create_role 显式设 provider + base_url，
+# 否则错误模型名会被发给默认供应商而失败（报告 §11/§17）。
+create_role () {  # name model provider base_url desc
+  local name="$1" model="$2" provider="$3" base_url="$4" desc="$5"
   hermes profile create "${name}" --description "${desc}" || true
   hermes -p "${name}" config set model.default "${model}"
+  hermes -p "${name}" config set model.provider "${provider}"
+  hermes -p "${name}" config set model.base_url "${base_url}"
   hermes -p "${name}" config set agent.max_turns 200
   hermes -p "${name}" config set terminal.cwd "${WORKSPACE}"
 }
 
-# CEO：只沟通（toolset 在第 4 步裁剪）
-create_role ceo               "anthropic/claude-opus-4.6"        "Talks to user, splits requirements, routes tasks. Never codes."
-# 产品委员会（不同模型）
-create_role pm-lead           "anthropic/claude-sonnet-4.6"      "Orchestrates product council."
-create_role pm-research-a     "openai/gpt-5.1"                   "Researches market, competitors, user scenarios."
-create_role pm-research-b     "google/gemini-3-flash-preview"   "Hunts for counter-examples and risks."
-create_role pm-critic         "anthropic/claude-opus-4.6"        "Challenges requirement gaps and over-design."
-create_role pm-synthesizer    "anthropic/claude-sonnet-4.6"      "Synthesizes PRD."
-# 架构委员会
-create_role arch-lead         "anthropic/claude-sonnet-4.6"      "Orchestrates architecture council."
-create_role arch-simple       "anthropic/claude-sonnet-4.6"      "Proposes lightest viable design."
-create_role arch-scale        "openai/gpt-5.1"                   "Proposes scalable design."
-create_role arch-security     "anthropic/claude-opus-4.6"        "Reviews security, isolation, permissions."
-create_role arch-critic       "google/gemini-3-flash-preview"   "Finds coupling and ripple-effect risks."
-create_role arch-synthesizer  "anthropic/claude-sonnet-4.6"      "Produces ADR + interface spec + TODO."
+# CEO：决策用主力模型，只沟通不写码
+create_role ceo               "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Talks to user, splits requirements, routes tasks. Never codes."
+# 产品委员会：zai × deepseek 交叉（critic 用另一家做跨模型质疑）
+create_role pm-lead           "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Orchestrates product council."
+create_role pm-research-a     "${ZAI_SECONDARY_MODEL}" "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Researches market, competitors, user scenarios."
+create_role pm-research-b     "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Hunts for counter-examples and risks."
+create_role pm-critic         "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Challenges requirement gaps and over-design."
+create_role pm-synthesizer    "${ZAI_SECONDARY_MODEL}" "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Synthesizes PRD."
+# 架构委员会：同样交叉
+create_role arch-lead         "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Orchestrates architecture council."
+create_role arch-simple       "${ZAI_SECONDARY_MODEL}" "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Proposes lightest viable design."
+create_role arch-scale        "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Proposes scalable design."
+create_role arch-security     "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Reviews security, isolation, permissions."
+create_role arch-critic       "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Finds coupling and ripple-effect risks."
+create_role arch-synthesizer  "${ZAI_SECONDARY_MODEL}" "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Produces ADR + interface spec + TODO."
 # 研发与质控
-create_role dev-lead          "anthropic/claude-sonnet-4.6"      "Splits and links coding tasks. Does not code."
-create_role dev-worker-1      "anthropic/claude-sonnet-4.6"      "Implements assigned task in its worktree only."
-create_role dev-worker-2      "anthropic/claude-sonnet-4.6"      "Implements assigned task in its worktree only."
-create_role qa                "anthropic/claude-opus-4.6"        "Writes/runs tests, blocks release, files defects."
-create_role release           "anthropic/claude-sonnet-4.6"      "Merges/packages/deploys after QA gate."
-create_role change-guardian   "anthropic/claude-opus-4.6"        "Change impact analysis and design gate."
+create_role dev-lead          "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Splits and links coding tasks. Does not code."
+create_role dev-worker-1      "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Implements assigned task in its worktree only."
+create_role dev-worker-2      "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Implements assigned task in its worktree only."
+create_role qa                "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Writes/runs tests, blocks release, files defects."
+create_role release           "${ZAI_PRIMARY_MODEL}"   "${ZAI_PROVIDER}"      "${ZAI_BASE_URL}"      "Merges/packages/deploys after QA gate."
+create_role change-guardian   "${DEEPSEEK_MODEL}"      "${DEEPSEEK_PROVIDER}" "${DEEPSEEK_BASE_URL}" "Change impact analysis and design gate."
 
 echo "==> [4/6] 裁剪 toolset（第一层权限）+ 注入 SOUL/AGENTS"
 # CEO：只能沟通+看板。v0.16 配置值用 JSON 数组；toolsets 是"附加列表"不限制内置工具，
@@ -101,10 +123,13 @@ for r in pm-lead pm-critic arch-lead arch-critic change-guardian dev-lead \
   hermes -p "$r" config set agent.disabled_toolsets '["code_execution","terminal"]'
 done
 # 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
+# 沙箱镜像：优先用部署时构建的非 root 镜像（映射宿主 UID，产物属主正确）。
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-autocode-python:3.11-local}"
+docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1 || SANDBOX_IMAGE="python:3.11-slim"
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
   hermes -p "$r" config set terminal.backend docker
-  hermes -p "$r" config set terminal.docker_image "python:3.11-slim"
+  hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
   # cwd 限定为本项目 workspace（gateway/cron 工作目录）。
   hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
   # 只挂本项目 workspace。v0.16 期望 JSON 数组（bare string 会 ValueError）。
@@ -126,11 +151,18 @@ name: policy
 description: Role permission and design-gate enforcement
 EOF
 # 关键：仅复制文件 Hermes 不会加载插件，必须显式 enable，否则第二层设计闸门全程缺席。
-HERMES_HOME="${HERMES_HOME}" hermes plugins enable policy
+# HERMES_ACCEPT_HOOKS=1 让非交互（gateway）路径也接受 hook，否则 pre_tool_call 可能不触发。
+export HERMES_ACCEPT_HOOKS=1
+hermes plugins enable policy
+hermes plugins list 2>/dev/null | grep -q policy \
+  || { echo "❌ policy 插件未启用，拒绝继续（第二层安全闸门缺失）"; exit 1; }
 
 echo "==> [6/6] 配置 Kanban + API server，启动 gateway（内嵌 dispatcher）"
 hermes config set kanban.dispatch_in_gateway true
-hermes config set kanban.max_in_progress 3
+# 低配机器（<4 核）默认降并发到 1，减少 429/OOM/CPU 排队（报告环境 2 核易排队）。
+MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-3}"
+[ "$(nproc 2>/dev/null || echo 4)" -lt 4 ] && MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-1}"
+hermes config set kanban.max_in_progress "${MAX_IN_PROGRESS}"
 hermes config set kanban.failure_limit 2
 # 该项目 CEO 的 API 端口（供你的网关转发）
 cat >> "${HERMES_HOME}/profiles/ceo/.env" <<EOF
@@ -144,6 +176,7 @@ EOF
 SERVICE="autocode-gw-${PROJECT_ID}"
 UNIT_DIR="${HOME}/.config/systemd/user"
 mkdir -p "${UNIT_DIR}"
+HERMES_BIN_DIR="$(dirname "$(command -v hermes)")"
 cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
 [Unit]
 Description=Autocode Hermes gateway for project ${PROJECT_ID}
@@ -152,8 +185,13 @@ After=network.target
 [Service]
 Type=simple
 Environment=HERMES_HOME=${HERMES_HOME}
+Environment=HERMES_ACCEPT_HOOKS=1
+Environment=XDG_RUNTIME_DIR=%t
+Environment=PATH=${HERMES_BIN_DIR}:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-${HOME}/.hermes/.env
+WorkingDirectory=${WORKSPACE}
 ExecStart=$(command -v hermes) -p ceo gateway run
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]
@@ -161,6 +199,8 @@ WantedBy=default.target
 EOF
 # 让 user service 在用户未登录时也能运行（开机自启）。
 loginctl enable-linger "$USER" 2>/dev/null || true
+# user systemd 需要 XDG_RUNTIME_DIR，否则 daemon-reload 报 "No medium found"（NEW-J）。
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user daemon-reload
 systemctl --user enable --now "${SERVICE}.service"
 # 用 `gateway run`（前台模式），故 Type=simple 正确——systemd 直接托管该前台进程。
