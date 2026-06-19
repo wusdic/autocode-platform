@@ -40,6 +40,9 @@
 | `terminal.docker_image` | ✅ | configuration.md |
 | `terminal.docker_volumes`（**JSON 数组** `["host:container"]`）| ✅ | **真机实测修正**：非 bare string、非 YAML list，必须 JSON 数组，否则容器启动 ValueError（NEW-M）|
 | `agent.disabled_toolsets`（denylist，跨 CLI+gateway） | ✅ | configuration.md（第一层权限的确定保证） |
+| `config set` 写入 `profiles/<name>/config.yaml` | ✅ | 真机日志逐行确认（`✓ Set ... in .../config.yaml`） |
+| ⚠️ `config show` **不渲染** `disabled_toolsets` 等字段 | ✅ | **真机实测**：校验权限要直接读 `config.yaml`，不能靠 `config show \| grep` |
+| `approvals.mode`（manual 默认 / off 无人值守） | ✅ | **真机实测**：默认 manual 会反复弹审批中断自动化；隔离架构下设 off 安全（见 §G） |
 | `toolsets`（**附加列表，非白名单**）| ✅ | **真机实测修正**：内置 `code_execution/terminal/file` 始终可用，必须用 `agent.disabled_toolsets` 显式禁用；值用 JSON 数组（NEW-K/L）|
 
 ## D. Hooks / 插件
@@ -47,6 +50,7 @@
 |---|---|---|
 | `pre_tool_call` 可在工具执行前 block | ✅ | hooks.md（需 `HERMES_ACCEPT_HOOKS=1` 在非交互/gateway 路径接受 hook）|
 | 插件复制到 `plugins/<name>/` 后**必须** `hermes plugins enable <name>` 才加载 | ✅ | **真机实测（NEW-O）**：仅复制不 enable → hook 整条流水线缺席 |
+| ⚠️ 校验插件勿用 `hermes plugins list \| grep -q`（pipefail+SIGPIPE 误判） | ✅ | **真机 P0**：grep -q 提前关管道致 hermes 退 141，pipefail 下误判未启用→建项目失败。改查 `plugins enable` 自身输出 |
 | Python 插件 `register(ctx)` + `ctx.register_hook(...)` | ✅ | hooks.md（Python 先注册，优先于 shell hook） |
 | **pre_tool_call 在 kanban-worker 路径是否可靠触发** | ⚠️🔴 | **issue #25204**：shell pre_tool_call 在 kanban-worker `chat -q` 不可靠（v0.13）；我们用 Python 插件更稳，但必须实测（Step 8-5 + hook_canary.sh 持续监测） |
 | 相关已知 bug | — | #2817（部分 hook 文档有却不触发）、#12922（post_tool_call 不覆盖内置工具） |
@@ -66,3 +70,12 @@
 - **架构委员会 swarm 触发**：✅ 已用代码闭合——`POST /architecture-swarm` 端点 + `watchdog.sh`"PRD 在、ADR 不在则自动起"兜底（marker 去重）。完整事件驱动（监听 synthesizer 卡 done）仍属阶段 13。
 - **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
+
+## G. 审批与无人值守安全模型
+平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台据真机实测设为 **off**（gateway 单元另加 `HERMES_YOLO_MODE=1`），均可用 `HERMES_APPROVALS_MODE` / `HERMES_YOLO_MODE` 覆盖。
+
+**为何不降低实际安全**（真机报告分析，Hermes 三层安全模型）：
+- **第 1 层 HARDLINE（12 条，不可绕过）**：`rm -rf /`、`mkfs`、`dd` 写裸设备、fork bomb、`shutdown` 等 + sudo-stdin guard——**off/yolo 也拦得住**。
+- 第 2 层 DANGEROUS（61 条）、第 3 层 Tirith（~80 条）：off 跳过。
+- 但**触发面已被架构消除**：CEO 无终端（`disabled_toolsets` 含 code_execution/terminal）；dev-worker 在 Docker（源码级豁免 approval.py，approval 本就不作用于容器内）；gateway 只跑 `hermes kanban`。
+> 结论：安全靠**架构隔离 + 设计闸门 + 监测告警**实现，不靠人工审批拦截。生产若需更严，把 `HERMES_APPROVALS_MODE=smart` 并确保 worker 全在 Docker。

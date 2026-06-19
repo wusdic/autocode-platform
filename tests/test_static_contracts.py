@@ -57,6 +57,26 @@ def test_monitor_does_not_use_config_get():
     assert "config get" not in read("platform/monitor.sh")
 
 
+# --- 真机 P0：插件校验不得用 `plugins list | grep -q`（pipefail+SIGPIPE 误判）---
+def test_launcher_no_plugins_list_grep_q_antipattern():
+    text = read("platform/launch_project.sh")
+    assert "plugins list | grep" not in text
+    assert "plugins list 2>/dev/null | grep" not in text
+
+
+# --- 无人值守：必须设 approvals.mode + gateway 单元带 HERMES_YOLO_MODE --------
+def test_launcher_sets_approvals_and_yolo():
+    text = read("platform/launch_project.sh")
+    assert "approvals.mode" in text
+    assert "HERMES_YOLO_MODE" in text
+
+
+# --- 权限校验读 config.yaml，不靠不渲染该字段的 config show -------------------
+def test_monitor_reads_config_yaml_for_permission_check():
+    text = read("platform/monitor.sh")
+    assert "config.yaml" in text
+
+
 # --- NEW-K/M：列表/卷配置必须 JSON 数组形式 ----------------------------------
 def test_launcher_config_values_are_json_arrays():
     text = read("platform/launch_project.sh")

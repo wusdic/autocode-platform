@@ -153,12 +153,22 @@ EOF
 # 关键：仅复制文件 Hermes 不会加载插件，必须显式 enable，否则第二层设计闸门全程缺席。
 # HERMES_ACCEPT_HOOKS=1 让非交互（gateway）路径也接受 hook，否则 pre_tool_call 可能不触发。
 export HERMES_ACCEPT_HOOKS=1
-hermes plugins enable policy
-hermes plugins list 2>/dev/null | grep -q policy \
-  || { echo "❌ policy 插件未启用，拒绝继续（第二层安全闸门缺失）"; exit 1; }
+# ⚠️ 不要把 plugins-list 输出用管道接 grep -q 来校验：grep -q 命中即提前关管道，
+# pipefail 下会把 hermes 的 SIGPIPE(141) 当成失败而误判"未启用"→ 建项目 100% 失败（真机 P0）。
+# 改为检查 enable 命令自身输出（无管道）。
+_enable_out="$(hermes plugins enable policy 2>&1 || true)"
+printf '%s\n' "${_enable_out}"
+case "${_enable_out}" in
+  *enabled*) : ;;   # "Plugin 'policy' enabled." 或 "... already enabled."
+  *) echo "❌ policy 插件启用失败，拒绝继续（第二层安全闸门缺失）：${_enable_out}"; exit 1 ;;
+esac
 
-echo "==> [6/6] 配置 Kanban + API server，启动 gateway（内嵌 dispatcher）"
+echo "==> [6/6] 配置 Kanban + 审批 + API server，启动 gateway（内嵌 dispatcher）"
 hermes config set kanban.dispatch_in_gateway true
+# 无人值守：跳过 DANGEROUS(61)/Tirith(~80) 审批，否则自动化流程被 approval 反复打断。
+# 安全不降级——HARDLINE(12 条: rm -rf /, mkfs, dd, fork bomb…) + sudo-stdin guard 仍不可
+# 绕过；CEO 无终端、dev-worker 在 Docker（源码级豁免）。可用 HERMES_APPROVALS_MODE 覆盖。
+hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-off}"
 # 低配机器（<4 核）默认降并发到 1，减少 429/OOM/CPU 排队（报告环境 2 核易排队）。
 MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-3}"
 [ "$(nproc 2>/dev/null || echo 4)" -lt 4 ] && MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-1}"
@@ -177,6 +187,7 @@ SERVICE="autocode-gw-${PROJECT_ID}"
 UNIT_DIR="${HOME}/.config/systemd/user"
 mkdir -p "${UNIT_DIR}"
 HERMES_BIN_DIR="$(dirname "$(command -v hermes)")"
+YOLO="${HERMES_YOLO_MODE:-1}"   # gateway 无人值守，无人可审批 → 默认跳过审批（见上方安全说明）
 cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
 [Unit]
 Description=Autocode Hermes gateway for project ${PROJECT_ID}
@@ -186,6 +197,7 @@ After=network.target
 Type=simple
 Environment=HERMES_HOME=${HERMES_HOME}
 Environment=HERMES_ACCEPT_HOOKS=1
+Environment=HERMES_YOLO_MODE=${YOLO}
 Environment=XDG_RUNTIME_DIR=%t
 Environment=PATH=${HERMES_BIN_DIR}:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-${HOME}/.hermes/.env

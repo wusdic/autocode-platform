@@ -52,27 +52,32 @@ check_stuck() {     # ② 卡死/失败任务堆积
 }
 
 check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 code_execution
-  local pid="$1" home="$2" dis
-  # v0.16 无 get 子命令，改用 config show（NEW-F）。
-  dis=$(HERMES_HOME="${home}" hermes -p ceo config show 2>/dev/null | grep -A5 disabled_toolsets || echo "")
-  if ! printf '%s' "${dis}" | grep -q "code_execution"; then
+  local pid="$1" home="$2" cfg
+  # 直接读 config.yaml——`hermes config show` 的格式化输出不含 disabled_toolsets 字段
+  # （真机实测会 grep 空匹配而误报 CRIT）。config set 已把它写进 config.yaml。
+  cfg="${home}/profiles/ceo/config.yaml"
+  [ -f "${cfg}" ] || return 0
+  local dis
+  dis=$(grep -A3 disabled_toolsets "${cfg}" 2>/dev/null || true)
+  if ! grep -q "code_execution" <<<"${dis}"; then
     notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 code_execution——第一层权限被改动！"
   fi
 }
 
 check_logs() {      # ④ Hermes 崩溃迹象（文件日志 + journald，因 gateway 由 systemd 托管）
   local pid="$1" home="$2" logf="${home}/gateway.log" jlog
-  if [ -f "${logf}" ] && tail -n 500 "${logf}" 2>/dev/null | grep -Eq "Traceback|CRITICAL|panic"; then
+  if [ -f "${logf}" ] && grep -Eq "Traceback|CRITICAL|panic" <(tail -n 500 "${logf}" 2>/dev/null); then
     notify WARN "project ${pid}: gateway.log 近期出现 Traceback/CRITICAL，请排查"
   fi
+  # 用 here-string（非 `printf | grep -q`）：避免 grep -q 提前关管道致 pipefail 下漏报。
   jlog=$(journalctl --user -u "autocode-gw-${pid}.service" -n 500 --no-pager 2>/dev/null || echo "")
-  printf '%s' "${jlog}" | grep -Eq "Traceback|CRITICAL|panic" \
+  grep -Eq "Traceback|CRITICAL|panic" <<<"${jlog}" \
     && notify WARN "project ${pid}: gateway journal 近期出现 Traceback/CRITICAL"
-  # 供应商错误分级：1113/余额耗尽（持续，需充值）→ CRIT；1305/临时过载（自恢复）→ WARN
-  printf '%s' "${jlog}" | grep -Eq "1113|Insufficient balance|no resource package" \
+  grep -Eq "1113|Insufficient balance|no resource package" <<<"${jlog}" \
     && notify CRIT "project ${pid}: 模型供应商余额耗尽，相关角色将无法工作（需充值）"
-  printf '%s' "${jlog}" | grep -Eq "1305|temporarily overloaded" \
+  grep -Eq "1305|temporarily overloaded" <<<"${jlog}" \
     && notify WARN "project ${pid}: 模型供应商临时过载，观察是否自动恢复"
+  return 0
 }
 
 check_root_files() {  # ⑥ Docker 以 root 写的产物宿主用户读不了 → 归还属主并告警
