@@ -27,16 +27,23 @@ if [ ! -d "${PLATFORM_DATA_ROOT}" ]; then
   sudo chown "$USER":"$USER" "${PLATFORM_DATA_ROOT}"
 fi
 
-echo "==> 创建控制平面 venv 并安装依赖"
+echo "==> 创建控制平面 venv 并安装依赖（带超时/重试，可选 PIP_INDEX_URL 镜像）"
 python3 -m venv "${PLATFORM_HOME}/venv"
-"${PLATFORM_HOME}/venv/bin/pip" install -r "${REPO_ROOT}/requirements.txt"
+PIP_INDEX_ARGS=()
+[ -n "${PIP_INDEX_URL:-}" ] && PIP_INDEX_ARGS=(--index-url "${PIP_INDEX_URL}")
+"${PLATFORM_HOME}/venv/bin/pip" install \
+  --timeout "${PIP_DEFAULT_TIMEOUT:-120}" --retries "${PIP_RETRIES:-5}" \
+  "${PIP_INDEX_ARGS[@]}" -r "${REPO_ROOT}/requirements.txt"
 
 echo "==> 构建非 root 沙箱镜像（产物属主正确，避免 Docker root 写文件）"
-if command -v docker >/dev/null 2>&1; then
-  docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
-    -t "${SANDBOX_IMAGE:-autocode-python:3.11-local}" \
-    -f "${REPO_ROOT}/docker/python-sandbox.Dockerfile" "${REPO_ROOT}" \
-    || echo "   （镜像构建失败，launcher 会回退到 python:3.11-slim）"
+if ! command -v docker >/dev/null 2>&1; then
+  echo "❌ 未找到 docker，无法构建 dev-worker 沙箱镜像（安全模型依赖它）" >&2
+  [ "${ALLOW_PUBLIC_SANDBOX_FALLBACK:-0}" = "1" ] || exit 1
+elif ! docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
+       -t "${SANDBOX_IMAGE:-autocode-python:3.11-local}" \
+       -f "${REPO_ROOT}/docker/python-sandbox.Dockerfile" "${REPO_ROOT}"; then
+  echo "❌ 沙箱镜像构建失败。修复 Docker 后重试；仅本地调试可设 ALLOW_PUBLIC_SANDBOX_FALLBACK=1。" >&2
+  [ "${ALLOW_PUBLIC_SANDBOX_FALLBACK:-0}" = "1" ] || exit 1
 fi
 
 echo "==> 安装控制平面 systemd 服务（持久 + Restart + 固定 token/PATH/XDG）"

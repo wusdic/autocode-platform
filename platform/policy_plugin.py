@@ -26,6 +26,7 @@ dispatcher spawn worker 是否仍把 HERMES_HOME 设为 ``<base>/.hermes/profile
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -173,6 +174,21 @@ def allowed_paths(ws: str, task_id: str | None) -> list[str] | None:
     return [line.strip() for line in f.read_text().splitlines() if line.strip()]
 
 
+def qa_release_allowed(ws: str) -> bool:
+    """QA gate：release 仅在 ``reports/qa/status.json`` 的 ``release_allowed == true`` 时放行。
+
+    服务设计目标"QA 未过不得发布"——QA 把失败/豁免结构化写入该文件（见 SOUL.qa），
+    release 不得把失败测试口头合理化为通过。文件缺失/无法解析/未放行 → 一律拦截。
+    """
+    f = Path(ws) / "reports" / "qa" / "status.json"
+    if not f.exists():
+        return False
+    try:
+        return json.loads(f.read_text()).get("release_allowed") is True
+    except (ValueError, OSError):
+        return False
+
+
 def _block(message: str) -> dict:
     return {"action": "block", "message": message}
 
@@ -218,6 +234,14 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
                     f"'{target}' is outside design/; route code to a dev-worker task."
                 )
         return None
+
+    # QA gate：release 的任何执行/写入都必须 QA 已放行（reports/qa/status.json）。
+    if role == "release" and tool_name in (WRITE_TOOLS | {"terminal"}):
+        if not qa_release_allowed(ws or workspace_dir()):
+            return _block(
+                "Release blocked: reports/qa/status.json missing or release_allowed != true. "
+                "QA gate must pass (or carry an approved waiver) before release."
+            )
 
     # QA / release：可执行（terminal 跑测试/构建），但写文件范围受限，不得改业务代码。
     if role in EXECUTOR_ROLES and tool_name in WRITE_TOOLS:

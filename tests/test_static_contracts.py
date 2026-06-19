@@ -64,11 +64,23 @@ def test_launcher_no_plugins_list_grep_q_antipattern():
     assert "plugins list 2>/dev/null | grep" not in text
 
 
-# --- 无人值守：必须设 approvals.mode + gateway 单元带 HERMES_YOLO_MODE --------
+# --- 无人值守：受控开关 AUTOCODE_UNATTENDED 控制 approvals + YOLO -------------
 def test_launcher_sets_approvals_and_yolo():
     text = read("platform/launch_project.sh")
     assert "approvals.mode" in text
     assert "HERMES_YOLO_MODE" in text
+    assert "AUTOCODE_UNATTENDED" in text
+
+
+# --- 沙箱镜像不得静默回退公共 root 镜像（破坏隔离安全模型）-------------------
+def test_launcher_sandbox_fallback_is_gated():
+    text = read("platform/launch_project.sh")
+    assert "ALLOW_PUBLIC_SANDBOX_FALLBACK" in text
+
+
+def test_deploy_fails_on_sandbox_build_failure():
+    text = read("scripts/01-deploy-platform.sh")
+    assert "ALLOW_PUBLIC_SANDBOX_FALLBACK" in text
 
 
 # --- 权限校验读 config.yaml，不靠不渲染该字段的 config show -------------------

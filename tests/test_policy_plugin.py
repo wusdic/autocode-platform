@@ -45,10 +45,9 @@ def test_change_guardian_can_write_design_but_not_run_terminal():
     assert pp.enforce("terminal", {}, role="change-guardian")["action"] == "block"
 
 
-def test_executor_role_allowed_to_run_terminal():
-    # qa / release 是执行角色，不在 NO_CODE_ROLES，应放行
-    assert pp.enforce("terminal", {}, role="qa") is None
-    assert pp.enforce("terminal", {}, role="release") is None
+def test_qa_role_allowed_to_run_terminal(tmp_path):
+    # qa 是执行角色，跑测试需要 terminal（不受 release 的 QA gate 限制）
+    assert pp.enforce("terminal", {}, role="qa", ws=str(tmp_path)) is None
 
 
 # --- 闸门 2：无 approved design_version 不准改代码 ----------------------------
@@ -169,12 +168,39 @@ def test_qa_may_write_tests_not_business_code(tmp_path):
     assert blocked and "may only write" in blocked["message"]
 
 
+def _qa_pass(ws):
+    qa = ws / "reports" / "qa"
+    qa.mkdir(parents=True, exist_ok=True)
+    (qa / "status.json").write_text('{"release_allowed": true}')
+
+
 def test_release_may_write_dist_not_code(tmp_path):
+    _qa_pass(tmp_path)   # 先让 QA gate 放行
     assert pp.enforce("write_file", {"path": "dist/pkg.whl"},
                       role="release", ws=str(tmp_path)) is None
     blocked = pp.enforce("patch", {"path": "src/main.py"},
                          role="release", ws=str(tmp_path))
     assert blocked and "may only write" in blocked["message"]
+
+
+def test_release_blocked_without_qa_status(tmp_path):
+    # QA gate：无 reports/qa/status.json → release 任何执行/写入都拦
+    for tool, args in [("terminal", {}), ("write_file", {"path": "dist/pkg.whl"})]:
+        res = pp.enforce(tool, args, role="release", ws=str(tmp_path))
+        assert res and "Release blocked" in res["message"]
+
+
+def test_release_blocked_when_qa_not_allowed(tmp_path):
+    qa = tmp_path / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text('{"release_allowed": false, "failed": 2}')
+    res = pp.enforce("terminal", {}, role="release", ws=str(tmp_path))
+    assert res and "Release blocked" in res["message"]
+
+
+def test_release_terminal_allowed_with_qa_pass(tmp_path):
+    _qa_pass(tmp_path)
+    assert pp.enforce("terminal", {}, role="release", ws=str(tmp_path)) is None
 
 
 def test_qa_terminal_still_allowed(tmp_path):

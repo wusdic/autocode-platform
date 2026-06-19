@@ -19,7 +19,13 @@ sudo apt update && sudo apt install -y \
 
 echo "==> [0.1] 安装 Docker（Dev/QA worker 的真沙箱后端）"
 if ! command -v docker >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sudo sh
+  if curl -fsSL --connect-timeout 15 https://get.docker.com | sudo sh; then
+    :
+  else
+    echo "  get.docker.com 不可达，回退安装 Ubuntu docker.io 包"
+    sudo apt update && sudo apt install -y docker.io
+    sudo systemctl enable --now docker || true
+  fi
   sudo usermod -aG docker "$USER"
   echo "已把 $USER 加入 docker 组，请重新登录或执行 'newgrp docker' 使其生效。"
 fi

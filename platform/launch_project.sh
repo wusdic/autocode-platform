@@ -123,9 +123,19 @@ for r in pm-lead pm-critic arch-lead arch-critic change-guardian dev-lead \
   hermes -p "$r" config set agent.disabled_toolsets '["code_execution","terminal"]'
 done
 # 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
-# 沙箱镜像：优先用部署时构建的非 root 镜像（映射宿主 UID，产物属主正确）。
+# 沙箱镜像：用部署时构建的非 root 镜像（映射宿主 UID，产物属主正确）。
+# 安全模型依赖它——不静默回退公共 root 镜像（破坏隔离/属主/可复现）。
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-autocode-python:3.11-local}"
-docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1 || SANDBOX_IMAGE="python:3.11-slim"
+if ! docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1; then
+  if [ "${ALLOW_PUBLIC_SANDBOX_FALLBACK:-0}" = "1" ]; then
+    echo "⚠️ 沙箱镜像 ${SANDBOX_IMAGE} 不存在，开发模式回退 python:3.11-slim（爆炸半径/属主不达标）" >&2
+    SANDBOX_IMAGE="python:3.11-slim"
+  else
+    echo "❌ 沙箱镜像 ${SANDBOX_IMAGE} 不存在，拒绝回退公共镜像（安全模型依赖非 root 自定义镜像）。" >&2
+    echo "   先跑 ./scripts/01-deploy-platform.sh 构建；仅本地调试可设 ALLOW_PUBLIC_SANDBOX_FALLBACK=1。" >&2
+    exit 1
+  fi
+fi
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
   hermes -p "$r" config set terminal.backend docker
@@ -165,10 +175,16 @@ esac
 
 echo "==> [6/6] 配置 Kanban + 审批 + API server，启动 gateway（内嵌 dispatcher）"
 hermes config set kanban.dispatch_in_gateway true
-# 无人值守：跳过 DANGEROUS(61)/Tirith(~80) 审批，否则自动化流程被 approval 反复打断。
-# 安全不降级——HARDLINE(12 条: rm -rf /, mkfs, dd, fork bomb…) + sudo-stdin guard 仍不可
-# 绕过；CEO 无终端、dev-worker 在 Docker（源码级豁免）。可用 HERMES_APPROVALS_MODE 覆盖。
-hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-off}"
+# 无人值守开关（显式可控）：AUTOCODE_UNATTENDED=1（默认，因为平台本就无人值守）时跳过
+# DANGEROUS(61)/Tirith(~80) 审批，否则自动化流程被 approval 反复打断。设 0 则保留人工审批。
+# 安全不降级——HARDLINE(12 条: rm -rf /, mkfs, dd, fork bomb…) + sudo-stdin guard 仍不可绕过；
+# CEO 无终端、dev-worker 在非 root Docker。审批配置只写本项目 HERMES_HOME，不动用户主配置。
+AUTOCODE_UNATTENDED="${AUTOCODE_UNATTENDED:-1}"
+if [ "${AUTOCODE_UNATTENDED}" = "1" ]; then
+  hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-off}"
+else
+  hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-manual}"
+fi
 # 低配机器（<4 核）默认降并发到 1，减少 429/OOM/CPU 排队（报告环境 2 核易排队）。
 MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-3}"
 [ "$(nproc 2>/dev/null || echo 4)" -lt 4 ] && MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-1}"
@@ -187,7 +203,8 @@ SERVICE="autocode-gw-${PROJECT_ID}"
 UNIT_DIR="${HOME}/.config/systemd/user"
 mkdir -p "${UNIT_DIR}"
 HERMES_BIN_DIR="$(dirname "$(command -v hermes)")"
-YOLO="${HERMES_YOLO_MODE:-1}"   # gateway 无人值守，无人可审批 → 默认跳过审批（见上方安全说明）
+# gateway 无人值守、无人可审批 → 默认跳过审批（受 AUTOCODE_UNATTENDED 控制，见上方安全说明）。
+[ "${AUTOCODE_UNATTENDED}" = "1" ] && YOLO="${HERMES_YOLO_MODE:-1}" || YOLO="${HERMES_YOLO_MODE:-0}"
 cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
 [Unit]
 Description=Autocode Hermes gateway for project ${PROJECT_ID}
