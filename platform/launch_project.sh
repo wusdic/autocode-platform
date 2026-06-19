@@ -42,12 +42,20 @@ done
 
 mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 
+# Bug-3：dev-worker 用 git worktree 工作区，workspace 必须是 git 仓库，否则 worktree 失败。
+if [ ! -d "${WORKSPACE}/.git" ]; then
+  git -C "${WORKSPACE}" init -q 2>/dev/null || true
+  git -C "${WORKSPACE}" add -A 2>/dev/null || true
+  git -C "${WORKSPACE}" -c user.email=autocode@local -c user.name=autocode \
+      commit -qm "init workspace" --allow-empty 2>/dev/null || true
+fi
+
 # 磁盘硬阈值（#7）：<5GB 拒绝建项目（Docker 镜像 + worktree + 日志会涨满）。
 # 仅本地调试可设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。
 _free_gb=$(df -BG --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
-if [ -n "${_free_gb}" ] && [ "${_free_gb}" -lt "${AUTOCODE_MIN_DISK_GB:-5}" ] \
+if [ -n "${_free_gb}" ] && [ "${_free_gb}" -lt "${AUTOCODE_MIN_DISK_GB:-2}" ] \
    && [ "${AUTOCODE_ALLOW_LOW_DISK:-0}" != "1" ]; then
-  echo "❌ ${PLATFORM_DATA_ROOT} 仅剩 ${_free_gb}GB（<${AUTOCODE_MIN_DISK_GB:-5}GB），拒绝建项目。设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。" >&2
+  echo "❌ ${PLATFORM_DATA_ROOT} 仅剩 ${_free_gb}GB（<${AUTOCODE_MIN_DISK_GB:-2}GB），拒绝建项目。设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。" >&2
   exit 1
 fi
 
@@ -145,14 +153,33 @@ if ! docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1; then
     exit 1
   fi
 fi
+# Bug-1（真机实测）：用 `config set` 写 docker_volumes 会把值存成 YAML **字符串标量**
+# （`docker_volumes: '["..."]'`），DockerEnvironment 检测到非 list 类型即静默丢弃 →
+# 容器无卷挂载 → runc "cwd outside of container mount namespace root"。
+# 必须直接把 config.yaml 的该键写成**真正的 YAML 列表**（用 pyyaml）。
+_PYBIN="${PLATFORM_HOME}/venv/bin/python"; [ -x "$_PYBIN" ] || _PYBIN="$(command -v python3)"
+set_docker_volumes() {  # profile  "host:container"
+  local cfg="${HERMES_HOME}/profiles/$1/config.yaml"
+  "$_PYBIN" - "$cfg" "$2" <<'PY'
+import sys, yaml, pathlib
+cfg, vol = sys.argv[1], sys.argv[2]
+p = pathlib.Path(cfg)
+d = yaml.safe_load(p.read_text()) if p.exists() else {}
+if not isinstance(d, dict): d = {}
+t = d.get("terminal")
+if not isinstance(t, dict): t = {}; d["terminal"] = t
+t["docker_volumes"] = [vol]
+p.write_text(yaml.safe_dump(d, default_flow_style=False, allow_unicode=True, sort_keys=False))
+PY
+}
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
   hermes -p "$r" config set terminal.backend docker
   hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
   # cwd 限定为本项目 workspace（gateway/cron 工作目录）。
   hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
-  # 只挂本项目 workspace。v0.16 期望 JSON 数组（bare string 会 ValueError）。
-  hermes -p "$r" config set terminal.docker_volumes "[\"${WORKSPACE}:${WORKSPACE}\"]"
+  # 只挂本项目 workspace —— 直接写 YAML 列表（见 Bug-1，不能用 config set）。
+  set_docker_volumes "$r" "${WORKSPACE}:${WORKSPACE}"
 done
 # 复制 base skills 快照到各 profile（只读模板）
 for d in "${HERMES_HOME}"/profiles/*/; do

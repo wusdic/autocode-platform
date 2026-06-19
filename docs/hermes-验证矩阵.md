@@ -26,8 +26,8 @@
 | profile = 独立 HERMES_HOME（`…/.hermes/profiles/<name>`） | ✅ | profiles.md（运行某 profile 时 HERMES_HOME 设到该子目录） |
 | profile **不是** 沙箱（local backend 有完整文件权限） | ✅ | profiles.md |
 | 不存在 `HERMES_PROFILE` 环境变量 | ✅ | profiles.md（当前 profile 靠 HERMES_HOME 体现） |
-| **自定义 base HERMES_HOME 下，dispatcher 是否把 worker HERMES_HOME 设到 `<base>/.hermes/profiles/<role>`** | ⚠️🔴 | **平台最大不确定点（角色识别）**；由《03》Step 8 第 5 项实测；不成立时 fail-closed 兜底 |
-| **pre_tool_call hook 是否能拿到当前 kanban 卡 `task_id`**（经参数或环境） | ⚠️🔴 | **平台第二大不确定点（第三道闸命门）**：拿不到 task_id → allowed_paths 查不到 → fail-closed 全锁，dev-worker 写不了任何代码。`resolve_task_id()` 已多探 kwargs+env 几个来源降风险；仍须真机验证（《03》Step 8-5 的放行半场会暴露此问题） |
+| 自定义 base HERMES_HOME 下角色识别（dispatcher 设 worker HERMES_HOME 到 `profiles/<role>`） | ✅ | **真机已证实**（round2 §5a）：设计闸门按角色正确拦截，说明 `resolve_role` 在真机生效 |
+| **pre_tool_call hook 是否拿到 kanban `task_id`** | ❌(已缓解) | **真机确认（round2 §5b）：Hermes 不经 `HERMES_KANBAN_TASK`/kwargs 传 task_id**，`resolve_task_id()→None`，第三道闸（task 级 allowed_paths）无法生效。已由 #2 **降级兜底**（项目级：可写 workspace 内非 design/，`POLICY_REQUIRE_TASK_ID=1` 可强制严格）→ 不影响主流程、安全仍靠第一/二层 |
 
 ## C. 配置键
 | 键 | 状态 | 来源 / 备注 |
@@ -38,7 +38,7 @@
 | `terminal.cwd` | ✅ | configuration.md |
 | `terminal.backend`（值 `docker` 合法） | ✅ | configuration.md（六种 backend） |
 | `terminal.docker_image` | ✅ | configuration.md |
-| `terminal.docker_volumes`（**JSON 数组** `["host:container"]`）| ✅ | **真机实测修正**：非 bare string、非 YAML list，必须 JSON 数组，否则容器启动 ValueError（NEW-M）|
+| `terminal.docker_volumes` 必须是 **YAML 列表** | ✅ | **真机修正（Bug-1）**：`config set` 写它会存成 YAML **字符串标量** → DockerEnvironment 当非 list 静默丢弃 → 容器无卷挂载 → runc 报错。须**直接写 config.yaml 为 YAML 列表**（pyyaml）|
 | `agent.disabled_toolsets`（denylist，跨 CLI+gateway） | ✅ | configuration.md（第一层权限的确定保证） |
 | `config set` 写入 `profiles/<name>/config.yaml` | ✅ | 真机日志逐行确认（`✓ Set ... in .../config.yaml`） |
 | ⚠️ `config show` **不渲染** `disabled_toolsets` 等字段 | ✅ | **真机实测**：校验权限要直接读 `config.yaml`，不能靠 `config show \| grep` |
@@ -52,7 +52,7 @@
 | 插件复制到 `plugins/<name>/` 后**必须** `hermes plugins enable <name>` 才加载 | ✅ | **真机实测（NEW-O）**：仅复制不 enable → hook 整条流水线缺席 |
 | ⚠️ 校验插件勿用 `hermes plugins list \| grep -q`（pipefail+SIGPIPE 误判） | ✅ | **真机 P0**：grep -q 提前关管道致 hermes 退 141，pipefail 下误判未启用→建项目失败。改查 `plugins enable` 自身输出 |
 | Python 插件 `register(ctx)` + `ctx.register_hook(...)` | ✅ | hooks.md（Python 先注册，优先于 shell hook） |
-| **pre_tool_call 在 kanban-worker 路径是否可靠触发** | ⚠️🔴 | **issue #25204**：shell pre_tool_call 在 kanban-worker `chat -q` 不可靠（v0.13）；我们用 Python 插件更稳，但必须实测（Step 8-5 + hook_canary.sh 持续监测） |
+| **pre_tool_call 在 kanban-worker 路径触发** | ✅ | **真机已证实**（round2 §5a）：dev-worker 在 Docker + yolo 下写码被设计闸门拦截 → Python 插件 hook **确实触发**（#25204 对本平台不成立）。hook_canary.sh 持续兜底监测 |
 | 相关已知 bug | — | #2817（部分 hook 文档有却不触发）、#12922（post_tool_call 不覆盖内置工具） |
 
 ## E. API Server / Gateway

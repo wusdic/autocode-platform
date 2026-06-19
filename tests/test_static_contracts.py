@@ -113,8 +113,14 @@ def test_monitor_reads_config_yaml_for_permission_check():
     assert "config.yaml" in text
 
 
-# --- NEW-K/M：列表/卷配置必须 JSON 数组形式 ----------------------------------
-def test_launcher_config_values_are_json_arrays():
+# --- 配置写法：disabled_toolsets 用 JSON 数组；docker_volumes 用 YAML 列表写入 -----
+def test_launcher_config_values_correct():
     text = read("platform/launch_project.sh")
-    assert 'docker_volumes "[\\"' in text          # JSON 数组，非 bare string
     assert "disabled_toolsets '[\"code_execution" in text  # 含 code_execution
+    # Bug-1：docker_volumes 不能用 config set（会存成字符串标量被丢弃），改 YAML 列表写入
+    assert "set_docker_volumes" in text
+    assert 'config set terminal.docker_volumes' not in text
+
+
+def test_launcher_git_inits_workspace():
+    assert "git -C" in read("platform/launch_project.sh") and "init" in read("platform/launch_project.sh")

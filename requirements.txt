@@ -3,5 +3,6 @@ fastapi>=0.110
 uvicorn>=0.27
 httpx>=0.27
 pydantic>=2.5
+pyyaml>=6.0            # launcher 用它把 terminal.docker_volumes 写成真正的 YAML 列表（Bug-1）
 psycopg2-binary>=2.9   # 生产化：注册表换 Postgres（阶段 13）
 redis>=5.0             # 生产化：事件总线用 Redis（阶段 13）
