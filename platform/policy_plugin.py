@@ -276,10 +276,22 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
             tid = resolve_task_id(task_id, kwargs)
             allow = allowed_paths(ws, tid)
             if allow is None:
-                return _block(
-                    f"No 'design/allowed_paths.{tid}.txt' for this task (task_id={tid}). "
-                    "Declare the file scope before writing code."
-                )
+                # 降级兜底（#2）：拿不到 task_id 或缺 allowed_paths 文件时，严格 fail-closed
+                # 会把 dev-worker 全锁、平台写不出代码。默认降级为"项目级"——允许写
+                # workspace 内、但不准碰 design/、不准越界（normalize 兜底逃逸）。
+                # 设 POLICY_REQUIRE_TASK_ID=1 可强制严格（不降级）。
+                if os.environ.get("POLICY_REQUIRE_TASK_ID") == "1":
+                    return _block(
+                        f"No 'design/allowed_paths.{tid}.txt' for this task (task_id={tid}). "
+                        "Declare the file scope before writing code."
+                    )
+                rel, err = normalize_target(ws, target)
+                if err or _under_design(rel or ""):
+                    return _block(
+                        f"Taskless-fallback (task_id={tid}): may write inside workspace but "
+                        "not design/ and not outside workspace."
+                    )
+                return None
             # 先规范化（堵绝对路径越界 / .. / symlink 逃逸），再做白名单匹配。
             rel, err = normalize_target(ws, target)
             if err:

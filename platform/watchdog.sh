@@ -5,11 +5,22 @@
 set -euo pipefail
 
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-/data/projects}"
+MAX_CONTINUATIONS="${MAX_CONTINUATIONS:-20}"   # 每项目续跑卡总上限，防永久失败任务无限续跑（#5）
+
+# 供应商限流暂停（#4）：monitor 检测到 1305 会写 .provider_pause（含 until epoch）。
+provider_paused() {
+  local f="${PLATFORM_DATA_ROOT}/.provider_pause"
+  [ -f "$f" ] || return 1
+  local until; until=$(cat "$f" 2>/dev/null | tr -dc '0-9')
+  [ -n "$until" ] && [ "$(date +%s)" -lt "$until" ]
+}
 
 for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
   [ -d "$proj_dir" ] || continue
   pid=$(basename "$proj_dir")
   export HERMES_HOME="${proj_dir}.hermes"
+  cnt_file="${proj_dir}workspace/.autocode/continuation_count"
+  mkdir -p "${proj_dir}workspace/.autocode" 2>/dev/null || true
 
   # 全量看板快照（一次拉取，供去重与读取原任务上下文）
   all_json=$(hermes kanban --board "$pid" list --json 2>/dev/null || echo '[]')
@@ -29,6 +40,18 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        exists=$(echo "$all_json" | jq -r --arg t "$title" \
                   '[.[] | select(.title==$t)] | length' 2>/dev/null || echo 0)
        [ "${exists:-0}" -gt 0 ] && continue
+       # 熔断（#5）：续跑卡超过上限就停自动续跑，建一张人工 review 卡而非无限续。
+       cnt=$(cat "$cnt_file" 2>/dev/null | tr -dc '0-9'); cnt="${cnt:-0}"
+       if [ "$cnt" -ge "$MAX_CONTINUATIONS" ]; then
+         if [ ! -f "${proj_dir}workspace/.autocode/.continuation_capped" ]; then
+           hermes kanban --board "$pid" create "NEEDS HUMAN REVIEW: ${MAX_CONTINUATIONS}+ continuations" \
+             --assignee dev-lead --idempotency-key "watchdog-capped-${pid}" \
+             --body "Watchdog 续跑已达上限 ${MAX_CONTINUATIONS}，疑似永久失败，停止自动续跑，请人工介入。" 2>/dev/null || true
+           touch "${proj_dir}workspace/.autocode/.continuation_capped"
+           echo "$(date -Is) [warn] project ${pid}: 续跑达上限 ${MAX_CONTINUATIONS}，停止自动续跑（建人工 review 卡）"
+         fi
+         continue
+       fi
        # 续跑卡：沿用原 assignee 与 workspace，并在正文指明续接的原任务
        extra=(--assignee "$assignee" --idempotency-key "watchdog-continue-${tid}"
               --goal --goal-max-turns 30 --json
@@ -50,13 +73,15 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
          cp "${dsg}/allowed_paths.${tid}.txt" "${dsg}/allowed_paths.${new_tid}.txt" 2>/dev/null || true
        fi
        hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation ${new_tid}" || true
+       echo "$(( cnt + 1 ))" > "$cnt_file"   # 续跑计数 +1（#5 熔断用）
      done
 
   # KNOWN-04 自动衔接：产品委员会出了 PRD 但还没 ADR → 自动起架构委员会 swarm。
   # 用 marker 文件去重，PRD 产出后只触发一次（正解是监听 synthesizer 卡 done 事件，阶段13）。
+  # 供应商限流暂停期间不起新 swarm（#4），避免持续打满同一供应商。
   design="${proj_dir}workspace/design"
   if [ -f "${design}/PRD.md" ] && [ ! -f "${design}/ADR.md" ] \
-     && [ ! -f "${design}/.arch_swarm_started" ]; then
+     && [ ! -f "${design}/.arch_swarm_started" ] && ! provider_paused; then
     if hermes kanban --board "$pid" swarm "产出 ADR+interface-spec+code-spec+TODO：基于 design/PRD.md" \
          --worker arch-simple:arch-simple --worker arch-scale:arch-scale \
          --worker arch-security:arch-security \

@@ -68,12 +68,24 @@ def _ws_with_approved(tmp_path):
     return ws
 
 
-def test_dev_worker_blocked_when_no_allowed_paths_file(tmp_path):
-    # fail-closed：有批准版本但缺 allowed_paths 文件 => 拒绝（必须先声明范围）
+def test_dev_worker_strict_blocked_when_no_allowed_paths_file(tmp_path, monkeypatch):
+    # 严格模式（POLICY_REQUIRE_TASK_ID=1）：有批准版本但缺 allowed_paths => 拒绝
+    monkeypatch.setenv("POLICY_REQUIRE_TASK_ID", "1")
     ws = _ws_with_approved(tmp_path)
     res = pp.enforce("patch", {"path": "src/a.py"}, task_id="t1",
                      role="dev-worker-1", ws=str(ws))
     assert res and "allowed_paths" in res["message"]
+
+
+def test_dev_worker_taskless_fallback_allows_src_blocks_design(tmp_path, monkeypatch):
+    # 默认降级（#2）：缺 allowed_paths 时，写 workspace 内放行、写 design/ 拦
+    monkeypatch.delenv("POLICY_REQUIRE_TASK_ID", raising=False)
+    ws = _ws_with_approved(tmp_path)
+    assert pp.enforce("patch", {"path": "src/a.py"}, task_id="t1",
+                      role="dev-worker-1", ws=str(ws)) is None
+    blk = pp.enforce("write_file", {"path": "design/approved_versions.txt"}, task_id="t1",
+                     role="dev-worker-1", ws=str(ws))
+    assert blk and "fallback" in blk["message"].lower()
 
 
 def test_dev_worker_terminal_blocked_without_approved_design(tmp_path):
@@ -152,8 +164,9 @@ def test_dev_worker_write_uses_task_id_from_kwargs(tmp_path):
     assert res is None
 
 
-def test_dev_worker_blocked_when_task_id_missing(tmp_path):
-    # 拿不到 task_id（第三道闸命门）→ fail-closed
+def test_dev_worker_strict_blocked_when_task_id_missing(tmp_path, monkeypatch):
+    # 严格模式下拿不到 task_id → fail-closed 全锁
+    monkeypatch.setenv("POLICY_REQUIRE_TASK_ID", "1")
     ws = _ws_with_approved(tmp_path)
     res = pp.enforce("write_file", {"path": "src/crud/x.py"},
                      role="dev-worker-1", ws=str(ws))

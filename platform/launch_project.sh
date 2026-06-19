@@ -42,6 +42,15 @@ done
 
 mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 
+# 磁盘硬阈值（#7）：<5GB 拒绝建项目（Docker 镜像 + worktree + 日志会涨满）。
+# 仅本地调试可设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。
+_free_gb=$(df -BG --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
+if [ -n "${_free_gb}" ] && [ "${_free_gb}" -lt "${AUTOCODE_MIN_DISK_GB:-5}" ] \
+   && [ "${AUTOCODE_ALLOW_LOW_DISK:-0}" != "1" ]; then
+  echo "❌ ${PLATFORM_DATA_ROOT} 仅剩 ${_free_gb}GB（<${AUTOCODE_MIN_DISK_GB:-5}GB），拒绝建项目。设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。" >&2
+  exit 1
+fi
+
 echo "==> [1/6] 创建独立 Hermes 实例目录 ${HERMES_HOME}"
 # 用独立 HERMES_HOME 跑后续所有 hermes 命令（已 export，子命令自动继承）
 

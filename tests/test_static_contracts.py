@@ -83,6 +83,23 @@ def test_deploy_fails_on_sandbox_build_failure():
     assert "ALLOW_PUBLIC_SANDBOX_FALLBACK" in text
 
 
+# --- 自动化加固：续跑熔断 / 供应商暂停 / 磁盘硬阈值 / 设计闸门降级 --------------
+def test_watchdog_has_continuation_cap_and_provider_pause():
+    text = read("platform/watchdog.sh")
+    assert "MAX_CONTINUATIONS" in text
+    assert "provider_paused" in text
+
+
+def test_launcher_has_disk_hard_threshold():
+    text = read("platform/launch_project.sh")
+    assert "AUTOCODE_MIN_DISK_GB" in text or "AUTOCODE_ALLOW_LOW_DISK" in text
+
+
+def test_policy_has_taskless_fallback_switch():
+    text = read("platform/policy_plugin.py")
+    assert "POLICY_REQUIRE_TASK_ID" in text
+
+
 # --- 权限校验读 config.yaml，不靠不渲染该字段的 config show -------------------
 def test_monitor_reads_config_yaml_for_permission_check():
     text = read("platform/monitor.sh")
