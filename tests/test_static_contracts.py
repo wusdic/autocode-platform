@@ -100,6 +100,11 @@ def test_policy_has_taskless_fallback_switch():
     assert "POLICY_REQUIRE_TASK_ID" in text
 
 
+def test_watchdog_has_optional_review_auto_approve():
+    text = read("platform/watchdog.sh")
+    assert "AUTOCODE_AUTO_APPROVE_REVIEW" in text
+
+
 # --- 权限校验读 config.yaml，不靠不渲染该字段的 config show -------------------
 def test_monitor_reads_config_yaml_for_permission_check():
     text = read("platform/monitor.sh")

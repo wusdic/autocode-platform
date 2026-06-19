@@ -76,6 +76,22 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        echo "$(( cnt + 1 ))" > "$cnt_file"   # 续跑计数 +1（#5 熔断用）
      done
 
+  # #1 可选：自动放行 dev-worker 的 review-required 自我阻断（默认关，保留人工把关）。
+  # 开启后由 watchdog 直接 kanban complete，实现真正零人工无人值守——但这会跳过人工代码
+  # 评审，请确保信任 QA gate + 设计闸门。设 AUTOCODE_AUTO_APPROVE_REVIEW=1 开启。
+  if [ "${AUTOCODE_AUTO_APPROVE_REVIEW:-0}" = "1" ]; then
+    echo "$all_json" \
+     | jq -r '.[] | select(([.block_reason, .reason, .blocked_reason, .last_event, .status]
+                            | map(. // "") | join(" ") | ascii_downcase) | test("review"))
+              | .id' 2>/dev/null \
+     | while read -r rid; do
+         [ -z "$rid" ] && continue
+         hermes kanban --board "$pid" complete "$rid" \
+           && echo "$(date -Is) [info] project ${pid}: 自动放行 review-required 卡 ${rid}" \
+           || echo "$(date -Is) [warn] project ${pid}: 自动放行卡 ${rid} 失败"
+       done
+  fi
+
   # KNOWN-04 自动衔接：产品委员会出了 PRD 但还没 ADR → 自动起架构委员会 swarm。
   # 用 marker 文件去重，PRD 产出后只触发一次（正解是监听 synthesizer 卡 done 事件，阶段13）。
   # 供应商限流暂停期间不起新 swarm（#4），避免持续打满同一供应商。
