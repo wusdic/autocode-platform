@@ -67,7 +67,7 @@
 | `gateway install` 的单元是**单个机器级 `hermes-gateway.service`** | ✅ | cli-commands.md；故我们改用每项目唯一命名 user 单元，隔离性待真机确认 |
 
 ## F. 已知设计限制
-- **架构委员会 swarm 触发**：✅ 已用代码闭合——`POST /architecture-swarm` 端点 + `watchdog.sh`"PRD 在、ADR 不在则自动起"兜底（marker 去重）。完整事件驱动（监听 synthesizer 卡 done）仍属阶段 13。
+- **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进（cron 每分钟 tick；状态存 `workspace/.autocode/state.json`）。watchdog 退回只管异常续跑。完整**事件驱动**（监听卡 done 事件而非轮询）仍属后续（需 Redis 事件总线）。
 - **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 

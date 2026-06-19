@@ -22,8 +22,9 @@ platform/
   control_plane.py      FastAPI 控制平面（对外唯一入口，10 个 /api 端点）
   policy_plugin.py      第二层权限硬拦（pre_tool_call hook：no-code/QA/release/dev-worker 闸）
   launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway
-  watchdog.sh           90 轮/崩溃/超时自动续跑 + PRD→ADR 自动起架构 swarm
-  monitor.sh            健康监测+告警：gateway/卡死/权限漂移/日志/磁盘/Docker属主/余额
+  orchestrator.py       状态机：产品→架构→dev→QA→release 全流程幂等编排（cron 每分钟）
+  watchdog.sh           异常续跑 + 熔断 + review 放行（不做正常编排，归 orchestrator）
+  monitor.sh            健康监测+告警：gateway/卡死/权限漂移/日志/磁盘/Docker属主/余额/限流
   hook_canary.sh        每小时探测设计闸门 hook 是否仍在 kanban-worker 路径生效
 platform-base/
   templates/            AGENTS.md（全局约束）+ 各角色 SOUL.*.md + requirements.yaml 模板

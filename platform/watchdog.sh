@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
-# Watchdog —— 处理 90 轮预算耗尽 / 崩溃 / 超时 / 卡死。
+# Watchdog —— 异常续跑/熔断/限流暂停/review 放行（**不做正常业务编排**，那归 orchestrator.py）。
 # 对应《02-从零开始操作手册.md》阶段 9。用 cron 每分钟跑：
 #   * * * * * ~/platform/watchdog.sh >> ~/platform/watchdog.log 2>&1
 set -euo pipefail
 
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-/data/projects}"
 MAX_CONTINUATIONS="${MAX_CONTINUATIONS:-20}"   # 每项目续跑卡总上限，防永久失败任务无限续跑（#5）
-
-# 供应商限流暂停（#4）：monitor 检测到 1305 会写 .provider_pause（含 until epoch）。
-provider_paused() {
-  local f="${PLATFORM_DATA_ROOT}/.provider_pause"
-  [ -f "$f" ] || return 1
-  local until; until=$(cat "$f" 2>/dev/null | tr -dc '0-9')
-  [ -n "$until" ] && [ "$(date +%s)" -lt "$until" ]
-}
 
 for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
   [ -d "$proj_dir" ] || continue
@@ -91,19 +83,6 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
            || echo "$(date -Is) [warn] project ${pid}: 自动放行卡 ${rid} 失败"
        done
   fi
-
-  # KNOWN-04 自动衔接：产品委员会出了 PRD 但还没 ADR → 自动起架构委员会 swarm。
-  # 用 marker 文件去重，PRD 产出后只触发一次（正解是监听 synthesizer 卡 done 事件，阶段13）。
-  # 供应商限流暂停期间不起新 swarm（#4），避免持续打满同一供应商。
-  design="${proj_dir}workspace/design"
-  if [ -f "${design}/PRD.md" ] && [ ! -f "${design}/ADR.md" ] \
-     && [ ! -f "${design}/.arch_swarm_started" ] && ! provider_paused; then
-    if hermes kanban --board "$pid" swarm "产出 ADR+interface-spec+code-spec+TODO：基于 design/PRD.md" \
-         --worker arch-simple:arch-simple --worker arch-scale:arch-scale \
-         --worker arch-security:arch-security \
-         --verifier arch-critic --synthesizer arch-synthesizer 2>/dev/null; then
-      touch "${design}/.arch_swarm_started"
-      echo "$(date -Is) [info] project ${pid}: 已自动启动架构委员会 swarm（PRD→ADR）"
-    fi
-  fi
+  # 正常业务编排（产品→架构→dev→QA→release）已交给 orchestrator.py 状态机；
+  # watchdog 只负责异常续跑/熔断/限流暂停/review 放行。
 done

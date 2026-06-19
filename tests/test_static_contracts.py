@@ -84,10 +84,12 @@ def test_deploy_fails_on_sandbox_build_failure():
 
 
 # --- 自动化加固：续跑熔断 / 供应商暂停 / 磁盘硬阈值 / 设计闸门降级 --------------
-def test_watchdog_has_continuation_cap_and_provider_pause():
-    text = read("platform/watchdog.sh")
-    assert "MAX_CONTINUATIONS" in text
-    assert "provider_paused" in text
+def test_watchdog_has_continuation_cap():
+    assert "MAX_CONTINUATIONS" in read("platform/watchdog.sh")
+
+
+def test_orchestrator_respects_provider_pause():
+    assert "provider_paused" in read("platform/orchestrator.py")
 
 
 def test_launcher_has_disk_hard_threshold():
