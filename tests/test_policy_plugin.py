@@ -1,4 +1,5 @@
-"""policy_plugin 三道闸的单元测试（对应设计方案第 3.1、6.2 节）。"""
+"""policy_plugin 各闸的单元测试（no-code / QA / release-QA-gate / dev-worker 设计闸门 /
+fail-closed），对应设计方案第 3.1、6.2、6.3 节。"""
 import policy_plugin as pp
 
 

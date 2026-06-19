@@ -2,19 +2,22 @@
 
 对应《01-最终设计方案.md》第 3.1、6.2 节，《02-从零开始操作手册.md》阶段 3。
 
-第一层权限是各 profile 的 toolset 裁剪（角色物理上没有越权工具）；
-本插件是第二层兜底：即使 toolset 漏配，也在工具调用前 block。
+第一层权限是各 profile 的 toolset 裁剪（`agent.disabled_toolsets` 移除 code_execution/
+terminal/file 等，角色物理上没有越权工具）；本插件是第二层兜底：即使第一层漏配，也在
+工具调用前 block。共五类闸（按角色）：
 
-三道闸：
-  1. no-code 角色禁止 *写代码/执行*（terminal / patch）；其 write_file 仅允许写
-     design/ 目录（设计文档），不得写代码。
-  2. 工程师改代码前必须存在 approved design_version。
-  3. 工程师只能改本 task 的 allowed_paths 内的文件。
+  A. no-code 角色（CEO/pm-*/arch-*/dev-lead/change-guardian）：禁 *写代码/执行*
+     （terminal / patch）；其 write_file 仅允许写 design/ 目录（规范化后判断），不得写代码。
+  B. QA：可执行（跑测试），但写文件仅限 tests/ 等，不得改业务代码。
+  C. release：① QA gate——`reports/qa/status.json` 的 release_allowed 必须为 true，
+     否则一切 terminal/写文件都拦；② 写文件仅限 dist/ 等发布产物。
+  D. dev-worker（设计闸门三道）：改代码前必须有 approved design_version；无批准设计
+     连 terminal 也拦；写文件必须有合法 task_id 的 allowed_paths，且目标（规范化后）在内。
+  E. fail-closed 兜底：角色识别不出时拒绝一切敏感工具。
 
-第 1 道闸特意区分「执行/改码」与「写设计文档」：synthesizer / change-guardian
-等角色需要写 design/（含 approved_versions.txt 这把"开闸钥匙"），若把 write_file
-一刀切禁掉会造成设计闸门死锁——synthesizer 写不了 approved_versions.txt，
-dev-worker 永远无法开工。
+A 类特意区分「执行/改码」与「写设计文档」：synthesizer / change-guardian 等角色需要写
+design/（含 approved_versions.txt 这把"开闸钥匙"），若把 write_file 一刀切禁掉会造成
+设计闸门死锁——synthesizer 写不了 approved_versions.txt，dev-worker 永远无法开工。
 
 角色识别：据官方文档，**每个 profile 有独立的 HERMES_HOME**，形如
 ``<base>/.hermes/profiles/<name>``，运行某 profile 时 ``HERMES_HOME`` 会被设到该子目录，

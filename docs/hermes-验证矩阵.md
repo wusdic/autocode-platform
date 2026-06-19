@@ -72,7 +72,7 @@
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 
 ## G. 审批与无人值守安全模型
-平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台据真机实测设为 **off**（gateway 单元另加 `HERMES_YOLO_MODE=1`），均可用 `HERMES_APPROVALS_MODE` / `HERMES_YOLO_MODE` 覆盖。
+平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台用**一个显式开关 `AUTOCODE_UNATTENDED`**（默认 1）统一控制：为 1 时本项目 `approvals.mode=off` + gateway 单元 `HERMES_YOLO_MODE=1`；为 0 时保留人工审批。审批配置只写**本项目 HERMES_HOME**，不动用户主配置。
 
 **为何不降低实际安全**（真机报告分析，Hermes 三层安全模型）：
 - **第 1 层 HARDLINE（12 条，不可绕过）**：`rm -rf /`、`mkfs`、`dd` 写裸设备、fork bomb、`shutdown` 等 + sudo-stdin guard——**off/yolo 也拦得住**。
