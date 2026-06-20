@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 不允许执行/改码的角色（兜底，即使 toolset 漏配）
@@ -67,6 +69,9 @@ _ROLE_ENV_KEYS = ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT")
 # 给子进程设 HERMES_KANBAN_BOARD，task id 也可能经类似 env 提供）。
 _TASK_KW_KEYS = ("task_id", "task", "kanban_task_id", "card_id")
 _TASK_ENV_KEYS = ("HERMES_KANBAN_TASK", "HERMES_KANBAN_TASK_ID", "HERMES_TASK_ID")
+# 真机实测：Hermes 不经 kwargs/env 传 task_id，但 dev 任务的 git worktree 目录名就是
+# task id（形如 t_f8700557）。从 cwd 路径段反推，让第三道闸（allowed_paths）真正生效。
+_TASK_ID_RE = re.compile(r"^t_[A-Za-z0-9_-]{4,}$")
 
 
 def resolve_role(explicit: str | None = None, kwargs: dict | None = None) -> str:
@@ -123,7 +128,36 @@ def resolve_task_id(explicit=None, kwargs=None):
     for env in _TASK_ENV_KEYS:
         if os.environ.get(env):
             return os.environ[env]
+    # 从 worktree/cwd 路径段反推 task id（worktree 目录名即 t_<id>）。
+    for c in (os.environ.get("TERMINAL_CWD"), os.environ.get("PWD"), _safe_cwd()):
+        if not c:
+            continue
+        for part in reversed(Path(c).parts):
+            if _TASK_ID_RE.match(part):
+                return part
     return None
+
+
+def _safe_cwd() -> str:
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
+def _log_fallback(ws: str, role: str, tool: str, target: str, tid) -> None:
+    """记录一次 taskless 降级，供 monitor 告警（让降级可观测，不再静默）。"""
+    try:
+        f = Path(ws) / "reports" / "security" / "policy_fallback.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "role": role, "tool": tool, "target": target,
+                "task_id": tid, "reason": "missing_task_allowed_paths",
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _under_design(target: str) -> bool:
@@ -291,6 +325,7 @@ def enforce(tool_name, args, task_id=None, role=None, ws=None, **kwargs):
                         f"Taskless-fallback (task_id={tid}): may write inside workspace but "
                         "not design/ and not outside workspace."
                     )
+                _log_fallback(ws, role, tool_name, target, tid)  # 降级可观测（monitor 告警）
                 return None
             # 先规范化（堵绝对路径越界 / .. / symlink 逃逸），再做白名单匹配。
             rel, err = normalize_target(ws, target)

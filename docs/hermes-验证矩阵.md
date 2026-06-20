@@ -27,7 +27,7 @@
 | profile **不是** 沙箱（local backend 有完整文件权限） | ✅ | profiles.md |
 | 不存在 `HERMES_PROFILE` 环境变量 | ✅ | profiles.md（当前 profile 靠 HERMES_HOME 体现） |
 | 自定义 base HERMES_HOME 下角色识别（dispatcher 设 worker HERMES_HOME 到 `profiles/<role>`） | ✅ | **真机已证实**（round2 §5a）：设计闸门按角色正确拦截，说明 `resolve_role` 在真机生效 |
-| **pre_tool_call hook 是否拿到 kanban `task_id`** | ❌(已缓解) | **真机确认（round2 §5b）：Hermes 不经 `HERMES_KANBAN_TASK`/kwargs 传 task_id**，`resolve_task_id()→None`，第三道闸（task 级 allowed_paths）无法生效。已由 #2 **降级兜底**（项目级：可写 workspace 内非 design/，`POLICY_REQUIRE_TASK_ID=1` 可强制严格）→ 不影响主流程、安全仍靠第一/二层 |
+| **pre_tool_call hook 是否拿到 kanban `task_id`** | ❌(已缓解+恢复) | **真机确认（round2 §5b）：Hermes 不经 `HERMES_KANBAN_TASK`/kwargs 传 task_id**。但 dev-worker 用 `worktree:<task_id>` workspace，其**进程 cwd 末段目录名即 `t_xxx`**——`resolve_task_id()` 在 kwargs/env 之后**新增从 cwd（`TERMINAL_CWD`/`PWD`/`getcwd`）反解**（评审 A），匹配 `^t_[A-Za-z0-9_-]{4,}$`，让第三道闸（task 级 allowed_paths）**在 worktree 模式下恢复生效**。反解失败才走 #2 项目级降级兜底，并落 `reports/security/policy_fallback.jsonl`（评审 B，monitor 告警）；`POLICY_REQUIRE_TASK_ID=1` 可强制严格 |
 
 ## C. 配置键
 | 键 | 状态 | 来源 / 备注 |
@@ -67,7 +67,7 @@
 | `gateway install` 的单元是**单个机器级 `hermes-gateway.service`** | ✅ | cli-commands.md；故我们改用每项目唯一命名 user 单元，隔离性待真机确认 |
 
 ## F. 已知设计限制
-- **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进（cron 每分钟 tick；状态存 `workspace/.autocode/state.json`）。watchdog 退回只管异常续跑。完整**事件驱动**（监听卡 done 事件而非轮询）仍属后续（需 Redis 事件总线）。
+- **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进（部署装 `autocode-orchestrator.timer` 每分钟 tick；状态存 `workspace/.autocode/state.json`）。起 release 需本轮 `qa_started`，挡残留旧 `status.json` 误触发（评审 E）；手动 `architecture-swarm` 端点与状态机共享 `arch_started` 标记，幂等不双触发（评审 D）。watchdog 退回只管异常续跑，且限流暂停期内不起新续跑卡（评审 C）。完整**事件驱动**（监听卡 done 事件而非轮询）仍属后续（需 Redis 事件总线）。
 - **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 

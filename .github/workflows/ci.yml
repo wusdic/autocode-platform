@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:   # 允许手动触发（Actions 页面 Run workflow），便于排查/重跑
 
 jobs:
   test:
@@ -26,6 +27,13 @@ jobs:
             echo "bash -n $f"
             bash -n "$f"
           done
+
+      - name: Shell lint (shellcheck)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          # SC1091: 不跟踪 source 的外部文件；SC2155: 声明即赋值（脚本里大量惯用）。
+          # 只挡真正的 bug 类（未引用变量误用、错误重定向等），不为风格噪声挡 CI。
+          shellcheck -S warning -e SC1091,SC2155 platform/*.sh scripts/*.sh
 
       - name: Docs / code consistency
         run: python scripts/check_docs.py

@@ -87,9 +87,20 @@ def test_dev_not_done_does_not_trigger_qa(tmp_path):
     assert not any(a == "qa" for _, a, _ in gw.created)
 
 
+def _advance_to_qa(gw, project, ws, data_root):
+    """把项目推进到 qa_started=True（PRD→架构→dev→dev全done→QA）。"""
+    for f in ("PRD.md", "ADR.md"):
+        (ws / "design" / f).write_text("x")
+    (ws / "design" / "approved_versions.txt").write_text("v1\n")
+    _orch(data_root, gw).tick(project)
+    gw.cards = [{"id": "d1", "assignee": "dev-worker-1", "status": "done"}]
+    assert _orch(data_root, gw).tick(project) == "qa"
+
+
 def test_qa_pass_triggers_release_then_complete(tmp_path):
     gw = FakeGateway()
     project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)
     qa = ws / "reports" / "qa"
     qa.mkdir(parents=True)
     (qa / "status.json").write_text('{"release_allowed": true}')
@@ -99,6 +110,19 @@ def test_qa_pass_triggers_release_then_complete(tmp_path):
     # release 卡 done → complete
     gw.cards = [{"id": "r1", "assignee": "release", "status": "done"}]
     assert _orch(data_root, gw).tick(project) == "complete"
+
+
+def test_stale_qa_status_does_not_trigger_release(tmp_path):
+    """残留旧 reports/qa/status.json（release_allowed=true）在本轮未跑 QA 时不得误触发 release。"""
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    qa = ws / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text('{"release_allowed": true}')
+    # 仅有 PRD（未到 QA 阶段），残留旧放行文件不得触发 release
+    (ws / "design" / "PRD.md").write_text("prd")
+    _orch(data_root, gw).tick(project)
+    assert not any(a == "release" for _, a, _ in gw.created)
 
 
 def test_provider_pause_blocks_new_swarm(tmp_path):

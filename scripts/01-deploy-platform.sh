@@ -72,15 +72,62 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 UNIT
+echo "==> 安装自动化循环 systemd 定时器（orchestrator 编排 / watchdog 续跑 / monitor 监测）"
+# 全自动闭环依赖这三个周期任务真的被装上——否则 orchestrator 状态机不跑，
+# 项目停在"建好但不推进"。用 systemd --user timer（而非 crontab）与控制平面一致：
+# 同享 EnvironmentFile、PATH/XDG，开机自启，失败有日志（journalctl --user -u …）。
+#   orchestrator-tick  每 1 分钟：推进 产品→架构→dev→QA→release 状态机
+#   watchdog           每 1 分钟：异常续跑/熔断/限流暂停/review 放行
+#   monitor            每 5 分钟：健康监测 + 告警
+install_timer() {  # name  exec  oncalendar
+  local name="$1" exec_cmd="$2" oncal="$3"
+  cat > "${UNIT_DIR}/${name}.service" <<SVC
+[Unit]
+Description=Autocode ${name}
+
+[Service]
+Type=oneshot
+WorkingDirectory=${PLATFORM_HOME}
+EnvironmentFile=${PLATFORM_HOME}/.platform_token.env
+Environment=XDG_RUNTIME_DIR=%t
+Environment=PATH=${HERMES_BIN_DIR}:${PLATFORM_HOME}/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=${exec_cmd}
+SVC
+  cat > "${UNIT_DIR}/${name}.timer" <<TMR
+[Unit]
+Description=Autocode ${name} timer
+
+[Timer]
+OnBootSec=1min
+OnCalendar=${oncal}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMR
+}
+install_timer autocode-orchestrator \
+  "${PLATFORM_HOME}/venv/bin/python ${PLATFORM_HOME}/orchestrator.py tick --all" "*:0/1"
+install_timer autocode-watchdog "/usr/bin/env bash ${PLATFORM_HOME}/watchdog.sh" "*:0/1"
+install_timer autocode-monitor  "/usr/bin/env bash ${PLATFORM_HOME}/monitor.sh"  "*:0/5"
+
 loginctl enable-linger "$USER" 2>/dev/null || true
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user daemon-reload
 systemctl --user enable --now autocode-control-plane.service || true
+for t in autocode-orchestrator autocode-watchdog autocode-monitor; do
+  systemctl --user enable --now "${t}.timer" || true
+done
 
 cat <<NEXT
 
 ✅ 部署完成。控制平面已作为 systemd 服务运行在 127.0.0.1:9000。
    PLATFORM_TOKEN 见 ${PLATFORM_HOME}/.platform_token
    状态：systemctl --user status autocode-control-plane.service
+   自动化循环（已装并启用）：
+     systemctl --user list-timers 'autocode-*'
+     - autocode-orchestrator.timer  每分钟推进状态机
+     - autocode-watchdog.timer       每分钟异常续跑/熔断
+     - autocode-monitor.timer        每 5 分钟健康监测/告警
 然后按操作手册阶段 5 创建第一个项目（请求头带 X-Token: <上面的 token>）。
 NEXT

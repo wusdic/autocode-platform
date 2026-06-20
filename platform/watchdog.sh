@@ -7,6 +7,22 @@ set -euo pipefail
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-/data/projects}"
 MAX_CONTINUATIONS="${MAX_CONTINUATIONS:-20}"   # 每项目续跑卡总上限，防永久失败任务无限续跑（#5）
 
+# 供应商限流暂停：monitor.sh 检测到 1305/额度耗尽时写 ${PLATFORM_DATA_ROOT}/.provider_pause
+# （内含 until-epoch）。暂停期内不再起新续跑卡，与 orchestrator.py 的 provider_paused 一致——
+# 否则限流期间狂建续跑卡只会把额度耗得更快、刷满看板。
+provider_paused() {
+  local f="${PLATFORM_DATA_ROOT}/.provider_pause"
+  [ -f "$f" ] || return 1
+  local until_epoch
+  until_epoch=$(tr -dc '0-9' < "$f"); until_epoch="${until_epoch:-0}"
+  [ "$(date +%s)" -lt "$until_epoch" ]
+}
+
+if provider_paused; then
+  echo "$(date -Is) [info] watchdog: 供应商限流暂停期内，跳过本轮续跑（.provider_pause 生效）"
+  exit 0
+fi
+
 for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
   [ -d "$proj_dir" ] || continue
   pid=$(basename "$proj_dir")

@@ -124,3 +124,49 @@ def test_launcher_config_values_correct():
 
 def test_launcher_git_inits_workspace():
     assert "git -C" in read("platform/launch_project.sh") and "init" in read("platform/launch_project.sh")
+
+
+# --- 评审 C：watchdog 也要在供应商限流暂停期内停起新续跑卡（与 orchestrator 一致）------
+def test_watchdog_respects_provider_pause():
+    text = read("platform/watchdog.sh")
+    assert "provider_paused" in text and ".provider_pause" in text
+
+
+# --- 评审 B：monitor 监测策略闸门 taskless 降级（细粒度隔离退化可观测）------------
+def test_monitor_checks_policy_fallback():
+    text = read("platform/monitor.sh")
+    assert "check_policy_fallback" in text and "policy_fallback.jsonl" in text
+
+
+# --- 评审 B：policy_plugin 走兜底时落 JSONL，且尝试从 worktree cwd 取 task_id -------
+def test_policy_logs_fallback_and_reads_worktree_taskid():
+    text = read("platform/policy_plugin.py")
+    assert "policy_fallback.jsonl" in text
+    assert "missing_task_allowed_paths" in text
+
+
+# --- 评审 E：orchestrator 起 release 需本轮 qa_started，挡残留旧 status.json 误触发 ---
+def test_orchestrator_release_requires_qa_started():
+    text = read("platform/orchestrator.py")
+    assert 'state.get("qa_started") and self._qa_release_allowed' in text
+
+
+# --- 评审 D：architecture-swarm 端点幂等（共享 arch_started）-----------------------
+def test_architecture_swarm_endpoint_is_idempotent():
+    text = read("platform/control_plane.py")
+    assert "architecture-swarm-already-started" in text
+    assert 'state.get("arch_started")' in text
+
+
+# --- 评审 G：部署脚本要把自动化循环装成 systemd 定时器（否则状态机不跑）------------
+def test_deploy_installs_automation_timers():
+    text = read("scripts/01-deploy-platform.sh")
+    for unit in ("autocode-orchestrator", "autocode-watchdog", "autocode-monitor"):
+        assert unit in text, unit
+    assert ".timer" in text
+
+
+# --- 评审 I：CI 跑 shellcheck，并允许手动触发 ------------------------------------
+def test_ci_runs_shellcheck_and_dispatch():
+    text = read(".github/workflows/ci.yml")
+    assert "shellcheck" in text and "workflow_dispatch" in text
