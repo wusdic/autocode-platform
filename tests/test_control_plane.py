@@ -96,6 +96,17 @@ def test_architecture_swarm_endpoint(client):
     assert verifier == "arch-critic" and synthesizer == "arch-synthesizer"
 
 
+def test_architecture_swarm_endpoint_idempotent(client):
+    """评审 D：手动重复调用不得重复起架构委员会 swarm（与 orchestrator 共享 arch_started）。"""
+    client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    client.post("/api/projects/proj1/architecture-swarm", headers=_h())
+    n_after_first = len(client.gateway.swarms)
+    r = client.post("/api/projects/proj1/architecture-swarm", headers=_h())
+    assert r.status_code == 200
+    assert r.json()["status"] == "architecture-swarm-already-started"
+    assert len(client.gateway.swarms) == n_after_first  # 没有第二次 swarm
+
+
 def test_swarm_cmd_uses_singular_worker_flag(monkeypatch, tmp_path):
     """回归 NEW-E：真实 HermesGateway.swarm 必须用单数可重复 --worker。"""
     calls = {}

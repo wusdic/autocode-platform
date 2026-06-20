@@ -50,8 +50,9 @@ if [ ! -d "${WORKSPACE}/.git" ]; then
       commit -qm "init workspace" --allow-empty 2>/dev/null || true
 fi
 
-# 磁盘硬阈值（#7）：<5GB 拒绝建项目（Docker 镜像 + worktree + 日志会涨满）。
-# 仅本地调试可设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。
+# 磁盘硬阈值（#7）：真机实测项目仅需 ~250MB、1.9GB 也能跑（Bug-2），故硬阈值取 2GB，
+# 与 monitor.sh 的 CRIT 阶梯对齐：monitor WARN<10GB（提醒）、monitor CRIT<2GB（危险）、
+# 建项目拒绝<2GB（落到危险区就不再新建）。仅本地调试可设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。
 _free_gb=$(df -BG --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
 if [ -n "${_free_gb}" ] && [ "${_free_gb}" -lt "${AUTOCODE_MIN_DISK_GB:-2}" ] \
    && [ "${AUTOCODE_ALLOW_LOW_DISK:-0}" != "1" ]; then

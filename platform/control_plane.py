@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -361,11 +362,23 @@ def create_app(
     def architecture_swarm(pid: str, x_token: str = Header(None)):
         """产品委员会产出 PRD 后，显式起架构委员会 swarm（闭合 KNOWN-04）。
 
-        生产应由 orchestrator/事件流在 pm-synthesizer 卡 done 后自动调用；
-        watchdog 也有"PRD 在、ADR 不在则自动起"的兜底（见 watchdog.sh）。
+        生产由 orchestrator 状态机在 PRD.md 出现后自动起（见 orchestrator.py tick）；
+        本端点是手动兜底/重试入口。**幂等**：与 orchestrator 共享
+        workspace/.autocode/state.json 的 arch_started 标记——已起过则直接返回，
+        避免手动调用与状态机重复起架构委员会 swarm（评审 D）。
         """
         auth(x_token)
         project = get_project(pid)
+        state_path = Path(project.workspace) / ".autocode" / "state.json"
+        state: dict = {}
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+            except (ValueError, OSError):
+                state = {}
+        if state.get("arch_started"):
+            return {"status": "architecture-swarm-already-started",
+                    "swarm": "architecture-council"}
         gateway.swarm(
             project,
             goal="产出 ADR + interface-spec + code-spec + TODO：基于 design/PRD.md",
@@ -373,6 +386,11 @@ def create_app(
             verifier="arch-critic",
             synthesizer="arch-synthesizer",
         )
+        # 落 arch_started，与 orchestrator.tick 幂等标记一致，互相去重。
+        state.update(arch_started=True, stage="architecture")
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
         return {"status": "architecture-swarm-started", "swarm": "architecture-council"}
 
     @app.post("/api/projects/{pid}/change-requests")

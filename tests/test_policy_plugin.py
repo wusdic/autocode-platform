@@ -231,6 +231,35 @@ def test_dev_worker_path_escape_blocked(tmp_path):
     assert res and res["action"] == "block"
 
 
+def test_resolve_task_id_from_worktree_cwd(monkeypatch):
+    # worktree 目录名即 task id（t_xxx），从 cwd 反推
+    for k in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_TASK_ID", "HERMES_TASK_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("TERMINAL_CWD", "/data/projects/demo1/workspace/.worktrees/t_f8700557")
+    assert pp.resolve_task_id(None, {}) == "t_f8700557"
+
+
+def test_per_task_scoping_works_via_worktree_taskid(tmp_path, monkeypatch):
+    # task_id 经 worktree cwd 解析到 → 第三道闸真正按 allowed_paths 生效
+    ws = _ws_with_approved(tmp_path)
+    (ws / "design" / "allowed_paths.t_abcd1234.txt").write_text("src/crud/\n")
+    monkeypatch.setenv("TERMINAL_CWD", str(ws / ".worktrees" / "t_abcd1234"))
+    assert pp.enforce("write_file", {"path": "src/crud/x.py"},
+                      role="dev-worker-1", ws=str(ws)) is None
+    blk = pp.enforce("write_file", {"path": "src/other/y.py"},
+                     role="dev-worker-1", ws=str(ws))
+    assert blk and "allowed_paths" in blk["message"]
+
+
+def test_taskless_fallback_is_logged(tmp_path, monkeypatch):
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    ws = _ws_with_approved(tmp_path)
+    assert pp.enforce("write_file", {"path": "src/a.py"},
+                      role="dev-worker-1", ws=str(ws)) is None
+    log = ws / "reports" / "security" / "policy_fallback.jsonl"
+    assert log.exists() and "missing_task_allowed_paths" in log.read_text()
+
+
 def test_resolve_role_project_named_profiles(monkeypatch):
     # 问题B：项目 id 恰好叫 profiles，不能误取第一段
     for k in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_AGENT"):

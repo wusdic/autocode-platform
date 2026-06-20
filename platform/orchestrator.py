@@ -124,20 +124,24 @@ class Orchestrator:
             self.gw.swarm(project, ARCH_GOAL, ARCH_WORKERS, "arch-critic", "arch-synthesizer")
             state.update(arch_started=True, stage="architecture"); changed = True
 
-        # 2) ADR + 开闸钥匙 → 让 dev-lead 切编码任务
-        if (ws / "design" / "ADR.md").exists() and self._approved(ws) and not state.get("dev_started"):
+        # 2) ADR + 开闸钥匙 → 让 dev-lead 切编码任务（限流暂停期不起新工作）
+        if (ws / "design" / "ADR.md").exists() and self._approved(ws) \
+                and not state.get("dev_started") and not paused:
             self.gw.kanban_create(project, "切分编码任务并链接依赖：基于 design/ADR.md + design/TODO.md",
                                   "dev-lead", "--goal")
             state.update(dev_started=True, stage="development"); changed = True
 
-        # 3) 所有 dev 卡 done → 起 QA
-        if state.get("dev_started") and self._all_dev_done(cards) and not state.get("qa_started"):
+        # 3) 所有 dev 卡 done → 起 QA（限流暂停期不起）
+        if state.get("dev_started") and self._all_dev_done(cards) \
+                and not state.get("qa_started") and not paused:
             self.gw.kanban_create(project, "全量 QA：基于 acceptance_core，并写 reports/qa/status.json",
                                   "qa", "--goal")
             state.update(qa_started=True, stage="qa"); changed = True
 
-        # 4) QA 放行 → 起 release
-        if self._qa_release_allowed(ws) and not state.get("release_started"):
+        # 4) 本轮 QA 已起 + QA 放行 → 起 release。要求 qa_started，避免残留旧
+        #    reports/qa/status.json（release_allowed=true）在本轮未跑 QA 时误触发 release。
+        if state.get("qa_started") and self._qa_release_allowed(ws) \
+                and not state.get("release_started") and not paused:
             self.gw.kanban_create(project, "发布：QA 通过后合并/打包/部署", "release", "--goal")
             state.update(release_started=True, stage="release"); changed = True
 
