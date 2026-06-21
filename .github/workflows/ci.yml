@@ -37,3 +37,10 @@ jobs:
 
       - name: Docs / code consistency
         run: python scripts/check_docs.py
+
+      - name: Sandbox image has git (build smoke test)
+        run: |
+          # 防回归：沙箱镜像必须含 git CLI，否则 worktree/分支合并全失效（第四轮 P0）。
+          docker build --build-arg UID=1000 --build-arg GID=1000 \
+            -t autocode-python:ci -f docker/python-sandbox.Dockerfile .
+          docker run --rm autocode-python:ci git --version

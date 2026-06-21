@@ -106,6 +106,19 @@ check_policy_fallback() {  # ⑦ 策略闸门降级可观测：policy_plugin 走
   fi
 }
 
+check_dev_commits() {  # ⑧ 交付完整性：dev 卡 done 但 git 几乎无提交 → 疑似产物未落地/worktree 未生效
+  local pid="$1" ws="${2}workspace"
+  [ -d "${ws}/.git" ] || return 0
+  local done_dev commits
+  done_dev=$(HERMES_HOME="${2}.hermes" hermes kanban --board "${pid}" list --json 2>/dev/null \
+    | jq '[.[] | select((.assignee // "")|startswith("dev-worker")) | select(.status=="done")] | length' 2>/dev/null)
+  commits=$(git -C "${ws}" rev-list --all --count 2>/dev/null || echo 0)
+  # 有 >=2 个 dev 卡完成，却只有 init 提交 → 高度疑似"声称完成但产物没落地/被覆盖"。
+  if [ "${done_dev:-0}" -ge 2 ] && [ "${commits:-0}" -le 1 ]; then
+    notify WARN "project ${pid}: ${done_dev} 个 dev 卡 done，但 git 仅 ${commits} 次提交——疑似产物未提交/worktree 未生效（查 ${ws}/.worktrees/）"
+  fi
+}
+
 check_disk() {      # ⑤ 数据盘：<DISK_MIN_GB(默认10) WARN；<DISK_CRIT_GB(默认2) CRIT（#7）
   local avail_gb
   avail_gb=$(df -BG --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
@@ -130,6 +143,7 @@ main() {
     check_logs "${pid}" "${home}"
     check_root_files "${pid}" "${proj_dir}"
     check_policy_fallback "${pid}" "${proj_dir}"
+    check_dev_commits "${pid}" "${proj_dir}"
   done
 }
 

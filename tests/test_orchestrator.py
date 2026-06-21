@@ -1,9 +1,26 @@
 """Orchestrator 状态机测试：注入 FakeGateway + 临时 workspace，覆盖各阶段跃迁 + 幂等。"""
 import json
+import subprocess
 from pathlib import Path
 
 import orchestrator as orch_mod
 from control_plane import Project
+
+
+def _git(ws, *a):
+    subprocess.run(["git", "-C", str(ws), *a], check=True, capture_output=True, text=True)
+
+
+def _init_repo(ws, with_src=False):
+    _git(ws, "init", "-q")
+    _git(ws, "config", "user.email", "a@b")
+    _git(ws, "config", "user.name", "a")
+    _git(ws, "commit", "-q", "--allow-empty", "-m", "init workspace")
+    if with_src:
+        (ws / "src").mkdir(exist_ok=True)
+        (ws / "src" / "a.py").write_text("x = 1\n")
+        _git(ws, "add", "-A")
+        _git(ws, "commit", "-q", "-m", "feat: a")
 
 
 class FakeGateway:
@@ -110,6 +127,35 @@ def test_qa_pass_triggers_release_then_complete(tmp_path):
     # release 卡 done → complete
     gw.cards = [{"id": "r1", "assignee": "release", "status": "done"}]
     assert _orch(data_root, gw).tick(project) == "complete"
+
+
+def test_integrity_gate_blocks_release_when_no_artifacts(tmp_path):
+    """dev 卡 done + QA 放行，但 git 只有 init 提交（产物没落地）→ 不起 release，建复验卡。"""
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)
+    _init_repo(ws, with_src=False)  # 仅 init 提交
+    qa = ws / "reports" / "qa"; qa.mkdir(parents=True)
+    (qa / "status.json").write_text('{"release_allowed": true}')
+    stage = _orch(data_root, gw).tick(project)
+    assert stage != "release"
+    assert not any(a == "release" for _, a, _ in gw.created)
+    assert any("产物落地校验失败" in t for t, _, _ in gw.created)
+    state = json.loads((ws / ".autocode" / "state.json").read_text())
+    assert state.get("integrity_blocked") is True
+
+
+def test_integrity_gate_passes_when_artifacts_present(tmp_path):
+    """补上真实提交后，完整性闸门放行 → 起 release。"""
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)
+    _init_repo(ws, with_src=True)  # init + feat 提交
+    qa = ws / "reports" / "qa"; qa.mkdir(parents=True)
+    (qa / "status.json").write_text('{"release_allowed": true}')
+    stage = _orch(data_root, gw).tick(project)
+    assert stage == "release"
+    assert any(a == "release" for _, a, _ in gw.created)
 
 
 def test_stale_qa_status_does_not_trigger_release(tmp_path):

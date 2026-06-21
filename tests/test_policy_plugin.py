@@ -222,6 +222,36 @@ def test_qa_terminal_still_allowed(tmp_path):
     assert pp.enforce("terminal", {}, role="qa", ws=str(tmp_path)) is None
 
 
+def test_release_blocked_when_integrity_block_fails(tmp_path):
+    # release_allowed=true 但 integrity 块未过（产物没落地）→ QA gate 仍拦
+    qa = tmp_path / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text(
+        '{"release_allowed": true, "integrity": {"git_clean": false, '
+        '"expected_files_present": true, "todo_markers": []}}')
+    res = pp.enforce("terminal", {}, role="release", ws=str(tmp_path))
+    assert res and "Release blocked" in res["message"]
+
+
+def test_release_allowed_when_integrity_block_passes(tmp_path):
+    qa = tmp_path / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text(
+        '{"release_allowed": true, "integrity": {"git_clean": true, '
+        '"expected_files_present": true, "todo_markers": []}}')
+    assert pp.enforce("terminal", {}, role="release", ws=str(tmp_path)) is None
+
+
+def test_release_blocked_when_todo_markers_present(tmp_path):
+    qa = tmp_path / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text(
+        '{"release_allowed": true, "integrity": {"git_clean": true, '
+        '"expected_files_present": true, "todo_markers": ["src/store.py"]}}')
+    res = pp.enforce("terminal", {}, role="release", ws=str(tmp_path))
+    assert res and "Release blocked" in res["message"]
+
+
 def test_dev_worker_path_escape_blocked(tmp_path):
     ws = _ws_with_approved(tmp_path)
     (ws / "design" / "allowed_paths.t1.txt").write_text("src/\n")

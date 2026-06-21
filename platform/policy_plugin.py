@@ -221,9 +221,21 @@ def qa_release_allowed(ws: str) -> bool:
     if not f.exists():
         return False
     try:
-        return json.loads(f.read_text()).get("release_allowed") is True
+        data = json.loads(f.read_text())
     except (ValueError, OSError):
         return False
+    if data.get("release_allowed") is not True:
+        return False
+    # 交付完整性：QA 写了 integrity 块就必须全部通过，挡"看板 done 但代码没落地/留占位"。
+    # （自包含，不 import qa_integrity——插件以单文件复制进 HERMES_HOME/plugins。）
+    integ = data.get("integrity") or {}
+    if integ and not (
+        integ.get("git_clean", True) is True
+        and integ.get("expected_files_present", True) is True
+        and not integ.get("todo_markers")
+    ):
+        return False
+    return True
 
 
 def _block(message: str) -> dict:

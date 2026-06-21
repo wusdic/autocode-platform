@@ -21,6 +21,7 @@
 platform/
   control_plane.py      FastAPI 控制平面（对外唯一入口，10 个 /api 端点）
   policy_plugin.py      第二层权限硬拦（pre_tool_call hook：no-code/QA/release/dev-worker 闸）
+  qa_integrity.py       交付完整性校验（防"看板 done 但代码没落地"：提交/产物/占位扫描）
   launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway
   orchestrator.py       状态机：产品→架构→dev→QA→release 全流程幂等编排（systemd timer 每分钟）
   watchdog.sh           异常续跑 + 熔断 + review 放行 + 限流暂停跳过（不做正常编排，归 orchestrator）
@@ -31,8 +32,9 @@ platform-base/
 docker/
   python-sandbox.Dockerfile  非 root 沙箱镜像（映射宿主 UID，产物属主正确）
 scripts/
-  00-host-setup.sh      宿主机准备（资源预检 / Docker / Hermes）
-  01-deploy-platform.sh 部署 + 建沙箱镜像 + 装控制平面 + 装自动化三循环 systemd 定时器
+  00-host-setup.sh      宿主机准备（资源预检 / Docker / Hermes，installer 内容校验）
+  01-deploy-platform.sh 部署 + 建沙箱镜像(含 git) + 装控制平面 + 装自动化三循环定时器 + 运行时模式
+  verify-acceptance.sh  六项端到端验收复验器（隔离/CEO/并行/设计闸门自动判，长跑项标 manual）
   check_docs.py         校验手册内嵌代码块语法（CI 用）
 tests/
   test_policy_plugin.py    权限各闸单测

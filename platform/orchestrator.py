@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import qa_integrity
 from control_plane import HermesGateway, Project, Settings
 
 ARCH_GOAL = "产出 ADR + interface-spec + code-spec + TODO：基于 design/PRD.md"
@@ -92,14 +93,19 @@ class Orchestrator:
         return f.exists() and bool([l for l in f.read_text().splitlines() if l.strip()])
 
     @staticmethod
-    def _qa_release_allowed(ws: Path) -> bool:
+    def _qa_status(ws: Path) -> dict:
         f = ws / "reports" / "qa" / "status.json"
         if not f.exists():
-            return False
+            return {}
         try:
-            return json.loads(f.read_text()).get("release_allowed") is True
+            data = json.loads(f.read_text())
+            return data if isinstance(data, dict) else {}
         except (ValueError, OSError):
-            return False
+            return {}
+
+    @classmethod
+    def _qa_release_allowed(cls, ws: Path) -> bool:
+        return cls._qa_status(ws).get("release_allowed") is True
 
     @staticmethod
     def _all_dev_done(cards: list) -> bool:
@@ -142,8 +148,21 @@ class Orchestrator:
         #    reports/qa/status.json（release_allowed=true）在本轮未跑 QA 时误触发 release。
         if state.get("qa_started") and self._qa_release_allowed(ws) \
                 and not state.get("release_started") and not paused:
-            self.gw.kanban_create(project, "发布：QA 通过后合并/打包/部署", "release", "--goal")
-            state.update(release_started=True, stage="release"); changed = True
+            # 独立交付完整性硬闸（不信任 agent 汇报）：dev 卡 done 却无任何提交/源码落地，
+            # 或 status.json 的 integrity 块未通过 → 不起 release，建一张人工 review 卡（幂等）。
+            ok, reason = qa_integrity.min_release_ok(
+                ws, self._all_dev_done(cards), self._qa_status(ws))
+            if not ok:
+                if not state.get("integrity_blocked"):
+                    self.gw.kanban_create(
+                        project, f"产物落地校验失败，阻断发布：{reason}", "dev-lead", "--goal")
+                    state.update(integrity_blocked=True, integrity_reason=reason)
+                    changed = True
+            else:
+                if state.get("integrity_blocked"):
+                    state["integrity_blocked"] = False
+                self.gw.kanban_create(project, "发布：QA 通过后合并/打包/部署", "release", "--goal")
+                state.update(release_started=True, stage="release"); changed = True
 
         # 5) release 完成 → 项目完成
         if state.get("release_started") and self._release_done(cards) and state.get("stage") != "complete":

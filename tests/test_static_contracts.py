@@ -170,3 +170,66 @@ def test_deploy_installs_automation_timers():
 def test_ci_runs_shellcheck_and_dispatch():
     text = read(".github/workflows/ci.yml")
     assert "shellcheck" in text and "workflow_dispatch" in text
+
+
+# --- 第四轮 P0：沙箱镜像必须装 git（否则 worktree/分支合并全失效）-----------------
+def test_python_sandbox_installs_git():
+    text = read("docker/python-sandbox.Dockerfile")
+    assert "apt-get install" in text and "git" in text
+    # 容器内 commit 需身份 + 信任挂载目录
+    assert "user.email" in text and "safe.directory" in text
+
+
+# --- 第四轮 P0：workspace git 提交身份必须持久化到 repo config（否则容器内 commit 失败）---
+def test_launcher_persists_git_identity():
+    text = read("platform/launch_project.sh")
+    assert "config user.email" in text and "config user.name" in text
+
+
+# --- 第四轮 P0：部署构建后断言镜像内有 git ----------------------------------------
+def test_deploy_asserts_sandbox_git():
+    text = read("scripts/01-deploy-platform.sh")
+    assert "git --version" in text
+
+
+# --- 第四轮 P0：dev-worker 配 worktree 根 / 仓库路径透传进容器 ----------------------
+def test_launcher_sets_worktree_env():
+    text = read("platform/launch_project.sh")
+    assert "WORKTREE_ROOT" in text and "GIT_REPO" in text
+
+
+# --- 第四轮 P0：交付完整性闸门（orchestrator 起 release 前 + QA gate 双校验）---------
+def test_orchestrator_has_integrity_gate():
+    text = read("platform/orchestrator.py")
+    assert "min_release_ok" in text and "qa_integrity" in text
+
+
+def test_policy_qa_gate_checks_integrity_block():
+    text = read("platform/policy_plugin.py")
+    assert "integrity" in text and "todo_markers" in text
+
+
+# --- 第四轮 P1：monitor 监测 dev 卡 done 但无提交（产物未落地可观测）---------------
+def test_monitor_checks_dev_commits():
+    text = read("platform/monitor.sh")
+    assert "check_dev_commits" in text
+
+
+# --- 第四轮 P1：部署按 AUTOCODE_MODE 写运行时 env（无人值守自动放行 review）---------
+def test_deploy_writes_runtime_mode_env():
+    text = read("scripts/01-deploy-platform.sh")
+    assert "AUTOCODE_MODE" in text and "AUTOCODE_AUTO_APPROVE_REVIEW" in text
+    assert ".platform_runtime.env" in text
+
+
+# --- 第四轮 P1：host-setup 校验 Hermes installer 是脚本（拒绝 HTML 错页）-----------
+def test_host_setup_validates_installer():
+    text = read("scripts/00-host-setup.sh")
+    assert "doctype html" in text.lower() and "HERMES_INSTALL_URL" in text
+
+
+# --- 第四轮 P1：不推荐 chmod 666 docker.sock，改 newgrp/早失败 --------------------
+def test_deploy_no_chmod_666_docker_sock():
+    text = read("scripts/01-deploy-platform.sh")
+    # 部署脚本应做 docker info 早失败 + newgrp 指引，而非建议 chmod 666
+    assert "docker info" in text and "newgrp docker" in text

@@ -38,8 +38,28 @@ fi
 docker run --rm hello-world || echo "（若此处失败，多半是 docker 组未生效或 Hub 不可达，重登/配镜像源后再试）"
 
 echo "==> [0.2] 安装 Hermes 0.16"
+# 不直接 pipe-to-bash：installer URL 若返回官网 HTML / CDN 错页 / 登录页，bash 会执行垃圾输入，
+# 报错难排查（上传的 install_hermes.sh 就是 hermes-agent.org 的首页 HTML，正是这个坑）。
+# 改为先下载到文件、校验"确实是 shell 脚本"再执行。可用 HERMES_INSTALL_URL 覆盖来源。
+install_hermes() {
+  local url="${HERMES_INSTALL_URL:-https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh}"
+  local tmp; tmp="$(mktemp)"
+  echo "  下载 Hermes installer：${url}"
+  curl -fL --retry 3 --connect-timeout 20 --max-time 180 \
+    -H 'Accept: text/plain, text/x-shellscript, */*' -o "${tmp}" "${url}" || {
+      echo "❌ 下载 installer 失败：${url}" >&2; rm -f "${tmp}"; return 1; }
+  if head -n 5 "${tmp}" | grep -qiE '<!doctype html|<html|<head|Hermes Agent —'; then
+    echo "❌ 下载到的是 HTML 页面而非 shell 安装脚本：${url}" >&2
+    head -n 5 "${tmp}" >&2; rm -f "${tmp}"; return 1
+  fi
+  if ! head -n 20 "${tmp}" | grep -Eq 'bash|/bin/sh|set -e|install'; then
+    echo "❌ installer 内容不像 shell 脚本，拒绝执行：${url}" >&2
+    head -n 20 "${tmp}" >&2; rm -f "${tmp}"; return 1
+  fi
+  bash "${tmp}"; local rc=$?; rm -f "${tmp}"; return $rc
+}
 if ! command -v hermes >/dev/null 2>&1; then
-  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+  install_hermes
 fi
 # shellcheck disable=SC1090
 source ~/.bashrc || true

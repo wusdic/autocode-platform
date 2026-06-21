@@ -68,6 +68,10 @@
 
 ## F. 已知设计限制
 - **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进（部署装 `autocode-orchestrator.timer` 每分钟 tick；状态存 `workspace/.autocode/state.json`）。起 release 需本轮 `qa_started`，挡残留旧 `status.json` 误触发（评审 E）；手动 `architecture-swarm` 端点与状态机共享 `arch_started` 标记，幂等不双触发（评审 D）。watchdog 退回只管异常续跑，且限流暂停期内不起新续跑卡（评审 C）。完整**事件驱动**（监听卡 done 事件而非轮询）仍属后续（需 Redis 事件总线）。
+- **dev-worker 并行真隔离（worktree）**：✅ 三重保障——① 沙箱镜像装 git（`docker/python-sandbox.Dockerfile`，否则容器内 `git worktree/commit/merge` 物理不可用）；② workspace git 提交身份持久化到 repo config + 镜像内 `git config` 兜底身份 + `safe.directory '*'`（否则容器内 commit 报"who are you"/dubious ownership 失败）；③ SOUL.dev-lead 强约束"每张编码卡必须 `--workspace worktree:${WORKTREE_ROOT}/<短名>` + allowed_paths"，dev-worker 完工 `git commit`，`terminal.env` 透传 WORKTREE_ROOT/GIT_REPO。monitor `check_dev_commits` 兜底观测"卡 done 但无提交"。
+- **交付完整性闸门**：✅ `qa_integrity.py` + orchestrator 起 release 前独立硬闸 `min_release_ok`（dev 卡 done 却只有 init 提交/无源码落地 → 拦，建复验卡，不信任 agent 汇报）+ policy QA gate 校验 `status.json.integrity`（git 脏/缺文件/留 TODO 占位 → 拦）。挡"看板 done 但代码没落地"（DEV-4 安全码丢失类）。
+- **无人值守模式**：✅ 部署按 `AUTOCODE_MODE`（production/unattended/demo）写 `.platform_runtime.env`，timers 读取；unattended 默认 `AUTOCODE_AUTO_APPROVE_REVIEW=1`，安全靠 QA gate + 设计闸门 + 完整性闸门三重兜底而非人工。
+- **限流暂停**：⚠️ 单一 `.provider_pause` 全局熔断，时长可调（`PROVIDER_PAUSE_SECONDS`）。按供应商分目录暂停 / 探测恢复属后续（避免探测自身触发限流 + 隔离复杂度）。
 - **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 

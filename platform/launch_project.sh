@@ -45,10 +45,17 @@ mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 # Bug-3：dev-worker 用 git worktree 工作区，workspace 必须是 git 仓库，否则 worktree 失败。
 if [ ! -d "${WORKSPACE}/.git" ]; then
   git -C "${WORKSPACE}" init -q 2>/dev/null || true
+  # 关键：提交身份要写进 repo config（不能只用 -c 临时传），否则 worker 在容器内 worktree
+  # 里 git commit 会因"无身份"失败 → dev 卡产物无 commit、release 无分支可合（真机症状）。
+  git -C "${WORKSPACE}" config user.email "autocode@local" 2>/dev/null || true
+  git -C "${WORKSPACE}" config user.name  "autocode" 2>/dev/null || true
   git -C "${WORKSPACE}" add -A 2>/dev/null || true
-  git -C "${WORKSPACE}" -c user.email=autocode@local -c user.name=autocode \
-      commit -qm "init workspace" --allow-empty 2>/dev/null || true
+  git -C "${WORKSPACE}" commit -qm "init workspace" --allow-empty 2>/dev/null || true
 fi
+# worktree 根：每个 dev task 一个子目录（在 WORKSPACE 下，已被 docker_volumes 挂载覆盖，
+# 容器内可见）。dev-lead 据此为每张编码卡指定 --workspace worktree:<root>/<短名>。
+WORKTREE_ROOT="${WORKSPACE}/.worktrees"
+mkdir -p "${WORKTREE_ROOT}"
 
 # 磁盘硬阈值（#7）：真机实测项目仅需 ~250MB、1.9GB 也能跑（Bug-2），故硬阈值取 2GB，
 # 与 monitor.sh 的 CRIT 阶梯对齐：monitor WARN<10GB（提醒）、monitor CRIT<2GB（危险）、
@@ -177,8 +184,11 @@ for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
   hermes -p "$r" config set terminal.backend docker
   hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
-  # cwd 限定为本项目 workspace（gateway/cron 工作目录）。
+  # cwd 限定为本项目 workspace（gateway/cron 工作目录）；按卡指定 worktree 时由 Hermes 覆盖为该 worktree。
   hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
+  # 把 worktree 根与仓库路径透传进容器，让 worker/dev-lead 知道在哪开 worktree（容器内可见）。
+  hermes -p "$r" config set terminal.env.WORKTREE_ROOT "${WORKTREE_ROOT}" 2>/dev/null || true
+  hermes -p "$r" config set terminal.env.GIT_REPO "${WORKSPACE}" 2>/dev/null || true
   # 只挂本项目 workspace —— 直接写 YAML 列表（见 Bug-1，不能用 config set）。
   set_docker_volumes "$r" "${WORKSPACE}:${WORKSPACE}"
 done
