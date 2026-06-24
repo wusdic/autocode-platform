@@ -12,6 +12,8 @@ disk_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
 [ "${disk_gb:-0}" -lt 20 ] && echo "  ⚠️ 根分区可用 ${disk_gb}GB < 20：端到端运行很可能磁盘不足"
 
 echo "==> [0.1] 安装系统依赖"
+# postgresql/redis-server 仅供阶段 13 生产化（持久注册表 + 事件总线）；MVP 用内存注册表，
+# 本不必装。这里一并装上以符合后续生产化，包很小（~50MB）。不想装可删本行二者。
 sudo apt update && sudo apt install -y \
   git curl build-essential ripgrep ffmpeg jq \
   python3 python3-venv python3-pip \

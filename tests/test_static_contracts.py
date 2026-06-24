@@ -148,7 +148,7 @@ def test_policy_logs_fallback_and_reads_worktree_taskid():
 # --- 评审 E：orchestrator 起 release 需本轮 qa_started，挡残留旧 status.json 误触发 ---
 def test_orchestrator_release_requires_qa_started():
     text = read("platform/orchestrator.py")
-    assert 'state.get("qa_started") and self._qa_release_allowed' in text
+    assert 'state.get("qa_started") and qa_status.get("release_allowed") is True' in text
 
 
 # --- 评审 D：architecture-swarm 端点幂等（共享 arch_started）-----------------------

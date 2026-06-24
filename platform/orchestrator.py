@@ -146,12 +146,13 @@ class Orchestrator:
 
         # 4) 本轮 QA 已起 + QA 放行 → 起 release。要求 qa_started，避免残留旧
         #    reports/qa/status.json（release_allowed=true）在本轮未跑 QA 时误触发 release。
-        if state.get("qa_started") and self._qa_release_allowed(ws) \
+        qa_status = self._qa_status(ws)   # 一次读盘，供放行判断与完整性硬闸共用
+        if state.get("qa_started") and qa_status.get("release_allowed") is True \
                 and not state.get("release_started") and not paused:
             # 独立交付完整性硬闸（不信任 agent 汇报）：dev 卡 done 却无任何提交/源码落地，
             # 或 status.json 的 integrity 块未通过 → 不起 release，建一张人工 review 卡（幂等）。
             ok, reason = qa_integrity.min_release_ok(
-                ws, self._all_dev_done(cards), self._qa_status(ws))
+                ws, self._all_dev_done(cards), qa_status)
             if not ok:
                 if not state.get("integrity_blocked"):
                     self.gw.kanban_create(

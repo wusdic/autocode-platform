@@ -42,15 +42,11 @@ NO_CODE_ROLES = {
     "pm-research-a", "pm-research-b", "pm-synthesizer",
     "arch-simple", "arch-scale", "arch-security", "arch-synthesizer",
 }
-# 兼容旧名
-NO_EXEC_ROLES = NO_CODE_ROLES
 
 # 直接执行/改码的工具：no-code 角色一律禁止
 CODE_TOOLS = {"terminal", "patch"}
 # 写文件工具：no-code 角色仅允许写 design/；dev-worker 需过设计闸门
 WRITE_TOOLS = {"patch", "write_file"}
-# 兼容旧名（旧测试/文档引用）
-EXEC_TOOLS = {"terminal", "patch", "write_file"}
 
 # 可执行/改码的具名角色（dev-worker-* 另按前缀判断）
 EXECUTOR_ROLES = {"qa", "release"}
@@ -248,6 +244,7 @@ def qa_release_allowed(ws: str) -> bool:
         integ.get("git_clean", True) is True
         and integ.get("expected_files_present", True) is True
         and not integ.get("todo_markers")
+        and not integ.get("scope_violations")
     ):
         return False
     return True

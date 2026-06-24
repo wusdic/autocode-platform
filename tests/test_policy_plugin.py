@@ -252,6 +252,18 @@ def test_release_blocked_when_todo_markers_present(tmp_path):
     assert res and "Release blocked" in res["message"]
 
 
+def test_release_blocked_when_scope_violations_present(tmp_path):
+    # 与 qa_integrity 一致：integrity 块含 scope_violations 时 release 必须被拦
+    qa = tmp_path / "reports" / "qa"
+    qa.mkdir(parents=True)
+    (qa / "status.json").write_text(
+        '{"release_allowed": true, "integrity": {"git_clean": true, '
+        '"expected_files_present": true, "todo_markers": [], '
+        '"scope_violations": [{"task_id": "t_x", "files": ["src/evil.py"]}]}}')
+    res = pp.enforce("terminal", {}, role="release", ws=str(tmp_path))
+    assert res and "Release blocked" in res["message"]
+
+
 def test_dev_worker_path_escape_blocked(tmp_path):
     ws = _ws_with_approved(tmp_path)
     (ws / "design" / "allowed_paths.t1.txt").write_text("src/\n")
