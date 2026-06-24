@@ -15,6 +15,8 @@ echo "==> 部署 platform/ → ${PLATFORM_HOME}"
 mkdir -p "${PLATFORM_HOME}"
 cp "${REPO_ROOT}/platform/"*.py "${PLATFORM_HOME}/"
 cp "${REPO_ROOT}/platform/"*.sh "${PLATFORM_HOME}/"
+# Web UI 单文件（控制平面 GET / 提供，带 CSP 安全头）。缺失则 / 返回 404，不影响 API。
+[ -f "${REPO_ROOT}/platform/webui.html" ] && cp "${REPO_ROOT}/platform/webui.html" "${PLATFORM_HOME}/"
 chmod +x "${PLATFORM_HOME}/"*.sh
 
 echo "==> 部署 platform-base/ → ${PLATFORM_BASE}"

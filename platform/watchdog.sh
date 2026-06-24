@@ -18,6 +18,18 @@ provider_paused() {
   [ "$(date +%s)" -lt "$until_epoch" ]
 }
 
+# 清理已过期的暂停标记。watchdog 每分钟跑，比 monitor（5min）/旧 glm_monitor（30min）更及时——
+# 限流一恢复，下一轮 tick 即清掉 .provider_pause，无需任何人工 rm（替代上传的 glm 脚本职责）。
+clear_expired_pause() {
+  local f="${PLATFORM_DATA_ROOT}/.provider_pause" until_epoch
+  [ -f "$f" ] || return 0
+  until_epoch=$(tr -dc '0-9' < "$f" 2>/dev/null); until_epoch="${until_epoch:-0}"
+  if [ "$(date +%s)" -ge "$until_epoch" ]; then
+    rm -f "$f" 2>/dev/null && echo "$(date -Is) [info] watchdog: .provider_pause 已过期，清理（恢复起新任务）"
+  fi
+}
+clear_expired_pause
+
 if provider_paused; then
   echo "$(date -Is) [info] watchdog: 供应商限流暂停期内，跳过本轮续跑（.provider_pause 生效）"
   exit 0

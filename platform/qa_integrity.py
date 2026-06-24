@@ -20,6 +20,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import scope_guard
+except ImportError:  # 容器内副本与 qa_integrity 同目录，正常可导入；缺失则范围审计降级为空
+    scope_guard = None
+
 # 提示性标记：出现说明"声称实现但留了占位"，QA 应据此判 release_allowed=false。
 # 仅作 integrity 块里的 informational 字段，不作 orchestrator 硬拦（避免误伤正常 TODO）。
 DEFAULT_TODO_MARKERS = ("checks go here", "TODO(DEV-", "implement me", "FIXME(DEV-")
@@ -83,6 +88,16 @@ def expected_files_present(ws: Path) -> bool:
     return next(_iter_src(ws), None) is not None
 
 
+def scope_violations(ws: Path) -> list:
+    """提交级范围审计违规（terminal 绕过 allowed_paths 写文件 → 在此被 git diff 抓出）。"""
+    if scope_guard is None:
+        return []
+    try:
+        return scope_guard.scan(ws).get("violations", [])
+    except Exception:
+        return []
+
+
 def compute(ws: Path) -> dict:
     """生成 integrity 块，供 QA 合并进 reports/qa/status.json。"""
     return {
@@ -91,6 +106,7 @@ def compute(ws: Path) -> dict:
         "worktrees_present": worktrees_present(ws),
         "expected_files_present": expected_files_present(ws),
         "todo_markers": scan_todo_markers(ws),
+        "scope_violations": scope_violations(ws),
     }
 
 
@@ -102,6 +118,7 @@ def integrity_block_ok(integrity: dict) -> bool:
         integrity.get("git_clean", True) is True
         and integrity.get("expected_files_present", True) is True
         and not integrity.get("todo_markers")
+        and not integrity.get("scope_violations")
     )
 
 
@@ -115,7 +132,11 @@ def min_release_ok(ws: Path, dev_done: bool, status: dict | None = None) -> tupl
     """
     status = status or {}
     if not integrity_block_ok(status.get("integrity") or {}):
-        return False, "reports/qa/status.json 的 integrity 块未全部通过（git 脏/缺文件/留占位）"
+        return False, "reports/qa/status.json 的 integrity 块未全部通过（git 脏/缺文件/留占位/越界）"
+    # 宿主侧独立范围审计（不信任容器内可被改写的脚本输出）：terminal 绕过 allowed_paths 在此被拦。
+    sv = scope_violations(ws)
+    if sv:
+        return False, f"提交级范围审计失败：{len(sv)} 个 worktree 改了 allowed_paths 外的文件"
     if not dev_done or not has_git(ws):
         return True, "skip（无 dev 工作或非 git 仓库，不评估产物落地）"
     if commit_count_all(ws) <= 1:

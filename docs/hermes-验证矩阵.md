@@ -71,7 +71,12 @@
 - **dev-worker 并行真隔离（worktree）**：✅ 三重保障——① 沙箱镜像装 git（`docker/python-sandbox.Dockerfile`，否则容器内 `git worktree/commit/merge` 物理不可用）；② workspace git 提交身份持久化到 repo config + 镜像内 `git config` 兜底身份 + `safe.directory '*'`（否则容器内 commit 报"who are you"/dubious ownership 失败）；③ SOUL.dev-lead 强约束"每张编码卡必须 `--workspace worktree:${WORKTREE_ROOT}/<短名>` + allowed_paths"，dev-worker 完工 `git commit`，`terminal.env` 透传 WORKTREE_ROOT/GIT_REPO。monitor `check_dev_commits` 兜底观测"卡 done 但无提交"。
 - **交付完整性闸门**：✅ `qa_integrity.py` + orchestrator 起 release 前独立硬闸 `min_release_ok`（dev 卡 done 却只有 init 提交/无源码落地 → 拦，建复验卡，不信任 agent 汇报）+ policy QA gate 校验 `status.json.integrity`（git 脏/缺文件/留 TODO 占位 → 拦）。挡"看板 done 但代码没落地"（DEV-4 安全码丢失类）。
 - **无人值守模式**：✅ 部署按 `AUTOCODE_MODE`（production/unattended/demo）写 `.platform_runtime.env`，timers 读取；unattended 默认 `AUTOCODE_AUTO_APPROVE_REVIEW=1`，安全靠 QA gate + 设计闸门 + 完整性闸门三重兜底而非人工。
-- **限流暂停**：⚠️ 单一 `.provider_pause` 全局熔断，时长可调（`PROVIDER_PAUSE_SECONDS`）。按供应商分目录暂停 / 探测恢复属后续（避免探测自身触发限流 + 隔离复杂度）。
+- **限流暂停（可自愈）**：✅ monitor 用 `journalctl --since` 时间窗（非 `-n 500`）+ 同一条 1305 日志指纹去重，避免旧日志反复触发新暂停（真机 D12 无限暂停循环根因）；watchdog 每分钟清过期 `.provider_pause`，限流一恢复下一轮即解除，无需人工 rm，也不必把默认模型切走。按供应商分目录暂停 / 探测恢复属后续。
+- **terminal 绕过 allowed_paths**：✅ dev-worker 有 terminal，可用 shell 绕开 write_file hook；`scope_guard.py` 对每个 worktree 的 git diff 做**提交级范围审计**（越界文件即拦），由 `qa_integrity`/orchestrator 在宿主侧独立跑，作为 release 前硬闸——隔离不只靠 pre-tool hook。
+- **task_id 可靠绑定**：✅ worktree 根写 `.autocode_task_id` 标记，`resolve_task_id` 先读标记再退路径反解；真机 v0.17 设计闸门三命门（拦/放/task_id 可达）全过。
+- **交付完整性在沙箱可达**：✅ `qa_integrity.py`/`scope_guard.py` 复制进 `${WORKSPACE}/.autocode/tools/`（容器挂载 WORKSPACE 即可见），SOUL.qa 调 `.autocode/tools/qa_integrity.py`；宿主侧 `min_release_ok` 不信任容器内可改写的输出，独立复核。
+- **用户面 Web UI**：✅ 控制平面 `GET /`（webui.html，CSP 安全头）+ 只读端点（list/state/artifact-content 白名单防穿越/conversation 读平台 JSONL）；前端转义渲染 + sessionStorage，防存储型 XSS。
+- **Hermes 版本**：核验于 v0.16；**v0.17.0 已真机验证向后兼容**（命令/配置键/API 未变）。
 - **systemd `gateway run`**：✅ 真机实测，`Type=simple` 正确（见 §E）。
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 

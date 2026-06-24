@@ -11,7 +11,7 @@ def _git(ws, *a):
 
 def _init_repo(ws):
     (ws / "design").mkdir(parents=True, exist_ok=True)
-    _git(ws, "init", "-q")
+    _git(ws, "init", "-q", "-b", "main")
     _git(ws, "config", "user.email", "a@b")
     _git(ws, "config", "user.name", "a")
     _git(ws, "commit", "-q", "--allow-empty", "-m", "init workspace")
@@ -60,6 +60,26 @@ def test_todo_markers_block_integrity():
     assert q.integrity_block_ok({"git_clean": True, "expected_files_present": True,
                                  "todo_markers": []}) is True
     assert q.integrity_block_ok({}) is True  # 未提供不在此拦
+
+
+def test_scope_violation_blocks_release(tmp_path):
+    # 在 worktree 里提交 allowed_paths 外的文件 → min_release_ok 应拦（terminal 绕过场景）
+    _init_repo(tmp_path)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x = 1\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "feat")
+    (tmp_path / "design").mkdir(exist_ok=True)
+    (tmp_path / ".worktrees").mkdir(exist_ok=True)
+    wt = tmp_path / ".worktrees" / "task1"
+    _git(tmp_path, "worktree", "add", "-q", "-b", "feat-task1", str(wt), "main")
+    (wt / ".autocode_task_id").write_text("t_task0001")
+    (tmp_path / "design" / "allowed_paths.t_task0001.txt").write_text("src/store.py\n")
+    (wt / "src" / "evil.py").write_text("z = 3\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "out of scope")
+    ok, reason = q.min_release_ok(tmp_path, dev_done=True, status={})
+    assert ok is False and "范围审计" in reason
 
 
 def test_compute_reports_signals(tmp_path):

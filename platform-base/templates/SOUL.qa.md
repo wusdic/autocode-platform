@@ -21,7 +21,7 @@
 任务产物真的在 workspace 里。跑平台脚本生成 integrity 块并并入 status.json：
 
 ```bash
-python "${GIT_REPO}/../qa_integrity.py" "${GIT_REPO}"   # 输出 integrity JSON
+python "${GIT_REPO}/.autocode/tools/qa_integrity.py" "${GIT_REPO}"   # 输出 integrity JSON（含 scope_violations）
 ```
 
 把它写进 `status.json` 的 `integrity` 字段：

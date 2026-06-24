@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 
 try:
@@ -152,6 +152,10 @@ class ProjectRegistry:
 
     def __contains__(self, pid: str) -> bool:
         return pid in self._projects
+
+    def all(self) -> list["Project"]:
+        """公开迭代接口——端点不要直接碰私有 _projects（换 Postgres 后端时 _projects 不存在）。"""
+        return sorted(self._projects.values(), key=lambda p: p.project_id)
 
 
 def rehydrate(registry: "ProjectRegistry", settings: Settings) -> None:
@@ -324,11 +328,29 @@ def create_app(
         registry.add(project)
         return {"project_id": project.project_id, "port": project.port, "status": "ready"}
 
+    def _log_turn(project: Project, session_id: str, role: str, content: str) -> None:
+        """把一轮对话追加到平台自有 JSONL（不读 Hermes 私有 SQLite——schema 不稳）。"""
+        try:
+            d = Path(project.workspace) / ".autocode" / "conversations"
+            d.mkdir(parents=True, exist_ok=True)
+            with (d / f"{session_id}.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(),
+                                     "role": role, "content": content}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
     @app.post("/api/projects/{pid}/messages")
     async def message_ceo(pid: str, body: Msg, x_token: str = Header(None)):
         auth(x_token)
         project = get_project(pid)
-        return await gateway.chat(project, body.message, body.session_id)
+        _log_turn(project, body.session_id, "user", body.message)
+        reply = await gateway.chat(project, body.message, body.session_id)
+        try:
+            text = reply["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            text = json.dumps(reply, ensure_ascii=False)
+        _log_turn(project, body.session_id, "assistant", text)
+        return reply
 
     @app.post("/api/projects/{pid}/confirm-plan")
     async def confirm_plan(pid: str, body: Optional[ConfirmPlan] = None,
@@ -430,7 +452,8 @@ def create_app(
         project = get_project(pid)
         ws = Path(project.workspace)
         items = []
-        for sub in ("design", "src"):
+        # 完整交付面：不只 design/src，还含 tests、QA/发布报告、产物（与 artifact-content 白名单一致）。
+        for sub in ("design", "src", "tests", "reports/qa", "reports/release", "dist"):
             base = ws / sub
             if base.exists():
                 for f in sorted(base.rglob("*")):
@@ -439,6 +462,10 @@ def create_app(
                             "path": str(f.relative_to(ws)),
                             "size": f.stat().st_size,
                         })
+        for name in ("README.md",):
+            f = ws / name
+            if f.is_file():
+                items.append({"path": name, "size": f.stat().st_size})
         return {"artifacts": items}
 
     @app.get("/api/projects/{pid}/demo")
@@ -463,6 +490,129 @@ def create_app(
             yield f"event: tasks\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------ #
+    # 用户面只读端点（Web UI 后端）。只读、白名单、防穿越。
+    # ------------------------------------------------------------------ #
+    def _kanban_summary(project: Project) -> tuple[dict, int]:
+        try:
+            tasks = gateway.kanban(project, "list", "--json")
+            by_status: dict = {}
+            for t in tasks:
+                s = t.get("status", "?")
+                by_status[s] = by_status.get(s, 0) + 1
+            return by_status, len(tasks)
+        except RuntimeError:
+            return {}, 0
+
+    @app.get("/api/projects")
+    def list_projects(x_token: str = Header(None)):
+        auth(x_token)
+        result = []
+        for project in registry.all():            # 公开接口，不碰私有 _projects
+            ws = Path(project.workspace)
+            stage = "created"
+            sp = ws / ".autocode" / "state.json"
+            if sp.exists():
+                try:
+                    stage = json.loads(sp.read_text()).get("stage", "created")
+                except (ValueError, OSError):
+                    pass
+            by_status, total = _kanban_summary(project)
+            result.append({"project_id": project.project_id, "port": project.port,
+                           "stage": stage, "task_summary": by_status, "total_tasks": total})
+        return {"projects": result}
+
+    @app.get("/api/projects/{pid}/state")
+    def project_state(pid: str, x_token: str = Header(None)):
+        auth(x_token)
+        project = get_project(pid)
+        ws = Path(project.workspace)
+        state = {"stage": "created"}
+        sp = ws / ".autocode" / "state.json"
+        if sp.exists():
+            try:
+                state = json.loads(sp.read_text())
+            except (ValueError, OSError):
+                pass
+        design_files = {n: (ws / "design" / n).exists() for n in
+                        ("requirements.yaml", "PRD.md", "ADR.md", "approved_versions.txt", "TODO.md")}
+        qa_status = {}
+        qa = ws / "reports" / "qa" / "status.json"
+        if qa.exists():
+            try:
+                qa_status = json.loads(qa.read_text())
+            except (ValueError, OSError):
+                pass
+        return {"project_id": pid, "state": state, "design_files": design_files,
+                "qa_status": qa_status, "workspace": str(ws)}
+
+    # 只读白名单：用户面只暴露交付面，绝不暴露 .hermes/.autocode/design 的钥匙文件等内部物。
+    def _safe_artifact(ws: Path, rel: str) -> Path:
+        root = ws.resolve()
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root):               # 防穿越（比 startswith 严谨）
+            raise HTTPException(403, "path traversal denied")
+        relposix = target.relative_to(root).as_posix()
+        top = relposix.split("/", 1)[0]
+        ok = (top in {"design", "src", "tests", "dist"}
+              or relposix.startswith("reports/qa/")
+              or relposix.startswith("reports/release/")
+              or relposix == "README.md")
+        if not ok:
+            raise HTTPException(403, "artifact path not allowed")
+        if not target.is_file():
+            raise HTTPException(404, "file not found")
+        return target
+
+    @app.get("/api/projects/{pid}/artifact-content")
+    def artifact_content(pid: str, path: str = Query(...), x_token: str = Header(None)):
+        auth(x_token)
+        project = get_project(pid)
+        target = _safe_artifact(Path(project.workspace), path)
+        max_size = 512 * 1024
+        try:
+            data = target.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return {"binary": True, "content": None, "truncated": False}
+        return {"content": data[:max_size], "truncated": len(data) > max_size, "binary": False}
+
+    @app.get("/api/projects/{pid}/conversation")
+    def get_conversation(pid: str, session_id: str = Query("main"), x_token: str = Header(None)):
+        auth(x_token)
+        project = get_project(pid)
+        # 只读平台自有 JSONL（见 message_ceo 的 _log_turn），不猜 Hermes 内部 sqlite。
+        f = Path(project.workspace) / ".autocode" / "conversations" / f"{session_id}.jsonl"
+        msgs = []
+        if f.exists():
+            for line in f.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        msgs.append(json.loads(line))
+                    except ValueError:
+                        pass
+        return {"messages": msgs, "session_id": session_id}
+
+    _SECURITY_HEADERS = {
+        # 纵深防御：即便前端某处有 XSS，CSP 也限制可加载资源与可外联的域。
+        # script/style 允许内联（单文件 UI 用），但 connect-src 'self' 是关键：即便注入脚本
+        # 执行了，也无法把 token 外联到 evil.com（配合前端转义渲染，双重挡住存储型 XSS）。
+        "Content-Security-Policy": ("default-src 'self'; img-src 'self' data:; "
+                                    "script-src 'self' 'unsafe-inline'; "
+                                    "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+                                    "frame-ancestors 'none'"),
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+    }
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def webui_root():
+        p = Path(__file__).parent / "webui.html"
+        if not p.exists():
+            return HTMLResponse("<h1>webui.html 未部署（把前端放到 ~/platform/webui.html）</h1>", 404)
+        return HTMLResponse(p.read_text(encoding="utf-8"), headers=_SECURITY_HEADERS)
 
     return app
 

@@ -55,6 +55,73 @@ def test_auth_rejects_bad_token(client):
     assert r.status_code == 401
 
 
+# --- 用户面只读端点（Web UI 后端）-------------------------------------------------
+def _mk(client, pid="proj1"):
+    client.post("/api/projects", json={"project_id": pid}, headers=_h())
+    from pathlib import Path
+    return Path(client.data_root) / pid / "workspace"
+
+
+def test_list_projects_returns_created(client):
+    _mk(client)
+    r = client.get("/api/projects", headers=_h())
+    assert r.status_code == 200
+    ids = [p["project_id"] for p in r.json()["projects"]]
+    assert "proj1" in ids
+    p = next(p for p in r.json()["projects"] if p["project_id"] == "proj1")
+    assert "stage" in p and "task_summary" in p
+
+
+def test_list_projects_requires_token(client):
+    assert client.get("/api/projects").status_code == 401
+
+
+def test_project_state_reports_design_files(client):
+    ws = _mk(client)
+    (ws / "design").mkdir(parents=True, exist_ok=True)
+    (ws / "design" / "PRD.md").write_text("prd")
+    r = client.get("/api/projects/proj1/state", headers=_h())
+    assert r.status_code == 200
+    assert r.json()["design_files"]["PRD.md"] is True
+    assert r.json()["design_files"]["ADR.md"] is False
+
+
+def test_artifact_content_allows_whitelisted(client):
+    ws = _mk(client)
+    (ws / "design").mkdir(parents=True, exist_ok=True)
+    (ws / "design" / "PRD.md").write_text("# hello")
+    r = client.get("/api/projects/proj1/artifact-content",
+                   params={"path": "design/PRD.md"}, headers=_h())
+    assert r.status_code == 200 and r.json()["content"] == "# hello"
+
+
+def test_artifact_content_blocks_traversal(client):
+    _mk(client)
+    r = client.get("/api/projects/proj1/artifact-content",
+                   params={"path": "../../etc/passwd"}, headers=_h())
+    assert r.status_code == 403
+
+
+def test_artifact_content_blocks_internal_dirs(client):
+    ws = _mk(client)
+    (ws / ".autocode").mkdir(parents=True, exist_ok=True)
+    (ws / ".autocode" / "state.json").write_text("{}")
+    r = client.get("/api/projects/proj1/artifact-content",
+                   params={"path": ".autocode/state.json"}, headers=_h())
+    assert r.status_code == 403
+
+
+def test_conversation_reads_platform_jsonl(client):
+    _mk(client)
+    client.post("/api/projects/proj1/messages",
+                json={"message": "hi", "session_id": "main"}, headers=_h())
+    r = client.get("/api/projects/proj1/conversation",
+                   params={"session_id": "main"}, headers=_h())
+    assert r.status_code == 200
+    roles = [m["role"] for m in r.json()["messages"]]
+    assert "user" in roles and "assistant" in roles
+
+
 def test_create_and_duplicate_project(client):
     r = client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
     assert r.status_code == 200

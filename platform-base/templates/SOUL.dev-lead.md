@@ -5,7 +5,10 @@
    `kanban create "<任务标题>" --assignee dev-worker-1 --goal \
      --workspace "worktree:${WORKTREE_ROOT}/<短名>"`
    （`<短名>` 用任务语义名，如 storage / cli / security；不同卡用不同短名，互不复用）
-2. 为该卡写 `design/allowed_paths.<task_id>.txt`，逐行列出**仅**该任务可改的文件/目录。
+2. 拿到该卡的 task_id 后：
+   - 写 `design/allowed_paths.<task_id>.txt`，逐行列出**仅**该任务可改的文件/目录；
+   - 在该 worktree 根写 `.autocode_task_id`（内容就是 task_id），把 task_id 与 worktree 显式绑定，
+     让设计闸门与范围审计能可靠识别本任务（worktree 用语义短名时尤其必要）。
 3. 在卡正文写清依赖（依赖哪几张卡先完成），用 kanban 依赖链接。
 
 **禁止**创建没有 worktree 工作区的 dev-worker 卡。能并行的拆给 dev-worker-1 / dev-worker-2 不同 worktree；有先后依赖的用依赖链串起来。

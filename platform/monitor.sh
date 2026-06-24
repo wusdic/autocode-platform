@@ -34,10 +34,16 @@ notify() {
   fi
 }
 
-check_gateway() {   # ① gateway 存活
+check_gateway() {   # ① gateway 存活（可选自恢复，默认只告警）
   local pid="$1"
   if ! systemctl --user is-active --quiet "autocode-gw-${pid}.service" 2>/dev/null; then
     notify CRIT "project ${pid}: gateway 'autocode-gw-${pid}.service' 未运行"
+    # AUTOCODE_AUTO_RESTART_GATEWAY=1 时尝试拉起（默认关，避免掩盖反复崩溃的真问题）。
+    if [ "${AUTOCODE_AUTO_RESTART_GATEWAY:-0}" = "1" ]; then
+      systemctl --user restart "autocode-gw-${pid}.service" 2>/dev/null \
+        && notify WARN "project ${pid}: gateway 已尝试自动重启" \
+        || notify CRIT "project ${pid}: gateway 自动重启失败，需人工介入"
+    fi
   fi
 }
 
@@ -71,15 +77,26 @@ check_logs() {      # ④ Hermes 崩溃迹象（文件日志 + journald，因 ga
     notify WARN "project ${pid}: gateway.log 近期出现 Traceback/CRITICAL，请排查"
   fi
   # 用 here-string（非 `printf | grep -q`）：避免 grep -q 提前关管道致 pipefail 下漏报。
-  jlog=$(journalctl --user -u "autocode-gw-${pid}.service" -n 500 --no-pager 2>/dev/null || echo "")
+  # 关键修复（D12 无限暂停循环）：用时间窗 `--since` 而非 `-n 500`。`-n 500` 取最近 500 行
+  # 与时间无关，旧的 1305/429 日志会被每轮反复匹配，每次重写 .provider_pause →“恢复了还在暂停”。
+  jlog=$(journalctl --user -u "autocode-gw-${pid}.service" --since "${JOURNAL_SINCE:-10 min ago}" --no-pager 2>/dev/null || echo "")
   grep -Eq "Traceback|CRITICAL|panic" <<<"${jlog}" \
     && notify WARN "project ${pid}: gateway journal 近期出现 Traceback/CRITICAL"
   grep -Eq "1113|Insufficient balance|no resource package" <<<"${jlog}" \
     && notify CRIT "project ${pid}: 模型供应商余额耗尽，相关角色将无法工作（需充值）"
   if grep -Eq "1305|temporarily overloaded" <<<"${jlog}"; then
-    notify WARN "project ${pid}: 模型供应商临时过载，已暂停起新 swarm ${PROVIDER_PAUSE_SECONDS:-600}s"
-    # #4：写暂停标记（until epoch），watchdog 据此暂停起新 swarm，避免持续打满。
-    echo "$(( $(date +%s) + ${PROVIDER_PAUSE_SECONDS:-600} ))" > "${PLATFORM_DATA_ROOT}/.provider_pause" 2>/dev/null || true
+    # 去重：同一条限流日志只触发一次暂停。取窗口内最新一行 1305 的指纹（行内容哈希），
+    # 与上次已处理的指纹比对；相同则不重写（避免“清了又写”把暂停无限续命）。
+    local newest fp_file last_fp
+    newest=$(grep -E "1305|temporarily overloaded" <<<"${jlog}" | tail -1)
+    fp_file="${home}/.last_1305_fp"
+    last_fp=$(cat "${fp_file}" 2>/dev/null || echo "")
+    local cur_fp; cur_fp=$(printf '%s' "${newest}" | cksum | awk '{print $1}')
+    if [ "${cur_fp}" != "${last_fp}" ]; then
+      notify WARN "project ${pid}: 模型供应商临时过载，暂停起新 swarm ${PROVIDER_PAUSE_SECONDS:-600}s"
+      echo "$(( $(date +%s) + ${PROVIDER_PAUSE_SECONDS:-600} ))" > "${PLATFORM_DATA_ROOT}/.provider_pause" 2>/dev/null || true
+      printf '%s' "${cur_fp}" > "${fp_file}" 2>/dev/null || true
+    fi
   fi
   return 0
 }

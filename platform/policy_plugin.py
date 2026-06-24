@@ -128,7 +128,22 @@ def resolve_task_id(explicit=None, kwargs=None):
     for env in _TASK_ENV_KEYS:
         if os.environ.get(env):
             return os.environ[env]
-    # 从 worktree/cwd 路径段反推 task id（worktree 目录名即 t_<id>）。
+    # 从 cwd 向上找 .autocode_task_id 标记文件（worktree 用语义短名时，目录名不含 t_<id>，
+    # 靠该标记把 task_id 与 worktree 显式绑定——比靠目录名/分支名约定更可靠）。
+    for c in (os.environ.get("TERMINAL_CWD"), os.environ.get("PWD"), _safe_cwd()):
+        if not c:
+            continue
+        p = Path(c)
+        for d in (p, *p.parents):
+            marker = d / ".autocode_task_id"
+            try:
+                if marker.exists():
+                    v = marker.read_text(encoding="utf-8").strip()
+                    if _TASK_ID_RE.match(v):
+                        return v
+            except OSError:
+                pass
+    # 退而求其次：从 worktree/cwd 路径段反推（worktree 目录名恰为 t_<id> 时生效）。
     for c in (os.environ.get("TERMINAL_CWD"), os.environ.get("PWD"), _safe_cwd()):
         if not c:
             continue

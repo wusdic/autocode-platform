@@ -37,7 +37,7 @@ if [ -n "${DOCKER_REGISTRY_MIRROR:-}" ]; then
 fi
 docker run --rm hello-world || echo "（若此处失败，多半是 docker 组未生效或 Hub 不可达，重登/配镜像源后再试）"
 
-echo "==> [0.2] 安装 Hermes 0.16"
+echo "==> [0.2] 安装/校验 Hermes（已验证 v0.16 / v0.17.0 兼容）"
 # 不直接 pipe-to-bash：installer URL 若返回官网 HTML / CDN 错页 / 登录页，bash 会执行垃圾输入，
 # 报错难排查（上传的 install_hermes.sh 就是 hermes-agent.org 的首页 HTML，正是这个坑）。
 # 改为先下载到文件、校验"确实是 shell 脚本"再执行。可用 HERMES_INSTALL_URL 覆盖来源。

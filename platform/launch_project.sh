@@ -42,9 +42,13 @@ done
 
 mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 
+# 平台内部目录不进项目 git 历史（state/conversations/tools/worktree checkout），
+# 否则会污染 dev 提交、让 scope_guard 的 diff 把工具脚本当成越界产物。
+[ -f "${WORKSPACE}/.gitignore" ] || printf '.autocode/\n.worktrees/\n' > "${WORKSPACE}/.gitignore"
 # Bug-3：dev-worker 用 git worktree 工作区，workspace 必须是 git 仓库，否则 worktree 失败。
 if [ ! -d "${WORKSPACE}/.git" ]; then
-  git -C "${WORKSPACE}" init -q 2>/dev/null || true
+  # 固定主线分支名 main（与沙箱镜像 init.defaultBranch 一致；老 git 不支持 -b 则退普通 init）。
+  git -C "${WORKSPACE}" init -q -b main 2>/dev/null || git -C "${WORKSPACE}" init -q 2>/dev/null || true
   # 关键：提交身份要写进 repo config（不能只用 -c 临时传），否则 worker 在容器内 worktree
   # 里 git commit 会因"无身份"失败 → dev 卡产物无 commit、release 无分支可合（真机症状）。
   git -C "${WORKSPACE}" config user.email "autocode@local" 2>/dev/null || true
@@ -56,6 +60,15 @@ fi
 # 容器内可见）。dev-lead 据此为每张编码卡指定 --workspace worktree:<root>/<短名>。
 WORKTREE_ROOT="${WORKSPACE}/.worktrees"
 mkdir -p "${WORKTREE_ROOT}"
+
+# 把完整性/范围校验脚本放进 workspace 内（容器只挂 WORKSPACE，~/platform 不可达——
+# 这是 SOUL.qa 调 qa_integrity.py 真机不可达的根因 P0-2）。放在 .autocode/tools（已 gitignore）。
+# 注意：容器内副本仅供 QA 生成 integrity 块用；release 的硬闸由 orchestrator 在【宿主侧】独立跑，
+# 不信任容器内可被改写的脚本输出。
+mkdir -p "${WORKSPACE}/.autocode/tools"
+for _tool in qa_integrity.py scope_guard.py; do
+  [ -f "${PLATFORM_HOME}/${_tool}" ] && cp "${PLATFORM_HOME}/${_tool}" "${WORKSPACE}/.autocode/tools/${_tool}" 2>/dev/null || true
+done
 
 # 磁盘硬阈值（#7）：真机实测项目仅需 ~250MB、1.9GB 也能跑（Bug-2），故硬阈值取 2GB，
 # 与 monitor.sh 的 CRIT 阶梯对齐：monitor WARN<10GB（提醒）、monitor CRIT<2GB（危险）、

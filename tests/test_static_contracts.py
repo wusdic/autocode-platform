@@ -233,3 +233,76 @@ def test_deploy_no_chmod_666_docker_sock():
     text = read("scripts/01-deploy-platform.sh")
     # 部署脚本应做 docker info 早失败 + newgrp 指引，而非建议 chmod 666
     assert "docker info" in text and "newgrp docker" in text
+
+
+# --- 第五轮 P0-1：monitor 用时间窗，不用 -n 500（D12 无限暂停循环根因）+ 去重 ------
+def test_monitor_journal_uses_time_window_not_tail():
+    text = read("platform/monitor.sh")
+    assert "--since" in text
+    assert "-n 500 --no-pager" not in text   # journal 不再用 -n 500 扫历史
+    assert ".last_1305_fp" in text           # 同一条限流日志只触发一次暂停（去重）
+
+
+def test_watchdog_clears_expired_pause():
+    text = read("platform/watchdog.sh")
+    assert "clear_expired_pause" in text
+
+
+# --- 第五轮 P0-2：qa_integrity 在沙箱内可达（复制进 .autocode/tools，SOUL 路径对齐）---
+def test_qa_integrity_reachable_in_sandbox():
+    launcher = read("platform/launch_project.sh")
+    assert ".autocode/tools" in launcher and "qa_integrity.py" in launcher
+    soul = read("platform-base/templates/SOUL.qa.md")
+    assert ".autocode/tools/qa_integrity.py" in soul
+    assert "${GIT_REPO}/../qa_integrity.py" not in soul   # 旧的不可达路径已移除
+
+
+# --- 第五轮 P0-3：提交级范围审计堵 terminal 绕过 allowed_paths --------------------
+def test_scope_guard_wired_into_integrity():
+    assert "def scan" in read("platform/scope_guard.py")
+    qi = read("platform/qa_integrity.py")
+    assert "scope_guard" in qi and "scope_violations" in qi
+
+
+# --- 第五轮 P0-4：task_id 用 .autocode_task_id 标记可靠绑定 worktree ----------------
+def test_policy_reads_task_id_marker():
+    assert ".autocode_task_id" in read("platform/policy_plugin.py")
+    assert ".autocode_task_id" in read("platform-base/templates/SOUL.dev-lead.md")
+
+
+# --- 第五轮 P0-2：workspace 平台内部目录 gitignore（不污染 dev 提交/scope 审计）-----
+def test_launcher_gitignores_internal_dirs():
+    text = read("platform/launch_project.sh")
+    assert ".gitignore" in text and ".autocode/" in text
+
+
+# --- 第五轮 P1：Web UI 只读端点 + 路径穿越用 is_relative_to + 白名单 ----------------
+def test_control_plane_readonly_endpoints_safe():
+    t = read("platform/control_plane.py")
+    assert "def list_projects" in t and "def project_state" in t
+    assert "def artifact_content" in t and "is_relative_to" in t
+    assert "def all(" in t              # registry 公开接口，不碰私有 _projects
+    assert "registry._projects" not in t.split("class ProjectRegistry")[1].split("def create_app")[0] \
+        or "def list_projects" in t     # list_projects 用 registry.all()
+
+
+def test_control_plane_conversation_no_hermes_sqlite():
+    t = read("platform/control_plane.py")
+    # 对话历史读平台自有 JSONL，不猜 Hermes 内部 response_store.db
+    assert "conversations" in t and "response_store.db" not in t
+
+
+# --- 第五轮 P1：webui.html 安全（转义渲染 / sessionStorage / 不 innerHTML 产物原文）---
+def test_webui_is_xss_safe():
+    html = read("platform/webui.html")
+    # token 存 sessionStorage，不用 localStorage 持久化（按实际 API 调用判定，不看注释）
+    assert "sessionStorage.setItem" in html
+    assert "localStorage.setItem" not in html and "localStorage.getItem" not in html
+    assert "textContent" in html
+    # 不得把 API/产物内容塞进 innerHTML（产物用 textContent 原样展示）
+    assert ".innerHTML = d.content" not in html and "innerHTML=md" not in html
+
+
+def test_control_plane_sets_csp_for_webui():
+    t = read("platform/control_plane.py")
+    assert "Content-Security-Policy" in t and "connect-src 'self'" in t

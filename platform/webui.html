@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autocode 控制台</title>
+<style>
+  :root { --bg:#0f1115; --panel:#1a1d24; --fg:#e6e6e6; --mut:#8a90a0; --acc:#4f8cff; --bad:#ff5d5d; --ok:#3ecf8e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:10px 16px; background:var(--panel); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  input,button,select { font:inherit; background:#11141a; color:var(--fg); border:1px solid #2a2f3a; border-radius:6px; padding:6px 10px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  main { display:grid; grid-template-columns:260px 1fr; gap:0; height:calc(100vh - 52px); }
+  aside { background:var(--panel); border-right:1px solid #2a2f3a; overflow:auto; padding:8px; }
+  section { overflow:auto; padding:16px; }
+  .proj { padding:8px; border-radius:6px; cursor:pointer; border:1px solid transparent; }
+  .proj:hover { background:#222631; }
+  .proj.active { border-color:var(--acc); background:#222631; }
+  .badge { font-size:11px; color:var(--mut); }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .tabs button.active { border-color:var(--acc); color:var(--acc); }
+  pre { background:#0b0d12; border:1px solid #2a2f3a; border-radius:6px; padding:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+  .row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+  .mut { color:var(--mut); }
+  .err { color:var(--bad); }
+  .ok { color:var(--ok); }
+  ul { padding-left:18px; }
+  li { cursor:pointer; }
+  li:hover { color:var(--acc); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Autocode 控制台</h1>
+  <input id="token" type="password" placeholder="X-Token" size="22">
+  <button id="connect">连接</button>
+  <span id="status" class="mut">未连接</span>
+</header>
+<main>
+  <aside><div id="projects" class="mut">（先填 token 连接）</div></aside>
+  <section>
+    <div class="tabs">
+      <button data-tab="state" class="active">状态</button>
+      <button data-tab="artifacts">产物</button>
+      <button data-tab="chat">对话</button>
+    </div>
+    <div id="view"><p class="mut">选择左侧项目。</p></div>
+  </section>
+</main>
+<script>
+"use strict";
+// 安全要点：① token 存 sessionStorage（关页即失效，比 localStorage 难被长期窃取）；
+//          ② 所有来自 API / AI 产物的文本一律 textContent / 转义后插入，绝不 innerHTML 原文；
+//          ③ Markdown/产物用 <pre> 原样展示（textContent），不解析 HTML —— 从根上杜绝存储型 XSS。
+const $ = (s, r=document) => r.querySelector(s);
+const state = { token:"", pid:null, tab:"state" };
+
+function esc(s){ return String(s==null?"":s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+  .replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+
+async function api(path){
+  const r = await fetch(path, { headers: { "X-Token": state.token } });
+  if (r.status === 401) throw new Error("token 无效 (401)");
+  if (!r.ok) throw new Error(path + " → " + r.status);
+  return r.json();
+}
+
+async function loadProjects(){
+  try {
+    const d = await api("/api/projects");
+    $("#status").textContent = "已连接"; $("#status").className = "ok";
+    const box = $("#projects"); box.innerHTML = "";
+    if (!d.projects.length) { box.textContent = "（暂无项目）"; box.className = "mut"; return; }
+    for (const p of d.projects) {
+      const el = document.createElement("div");
+      el.className = "proj" + (p.project_id === state.pid ? " active" : "");
+      // textContent：项目名/阶段即便含 < > 也不会被解析
+      const t = document.createElement("div"); t.textContent = p.project_id;
+      const b = document.createElement("div"); b.className = "badge";
+      b.textContent = "stage: " + p.stage + " · tasks: " + p.total_tasks;
+      el.appendChild(t); el.appendChild(b);
+      el.onclick = () => { state.pid = p.project_id; render(); loadProjects(); };
+      box.appendChild(el);
+    }
+  } catch (e) {
+    $("#status").textContent = e.message; $("#status").className = "err";
+  }
+}
+
+async function render(){
+  const v = $("#view");
+  if (!state.pid) { v.innerHTML = '<p class="mut">选择左侧项目。</p>'; return; }
+  v.textContent = "加载中…";
+  try {
+    if (state.tab === "state") {
+      const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/state");
+      v.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(d, null, 2);   // textContent，绝不解析
+      v.appendChild(pre);
+    } else if (state.tab === "artifacts") {
+      const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/artifacts");
+      v.innerHTML = "<p class='mut'>点击查看（原样文本展示，不解析 HTML）：</p>";
+      const ul = document.createElement("ul");
+      for (const a of d.artifacts) {
+        const li = document.createElement("li");
+        li.textContent = a.path + "  (" + a.size + "B)";
+        li.onclick = () => viewArtifact(a.path);
+        ul.appendChild(li);
+      }
+      v.appendChild(ul);
+      const out = document.createElement("pre"); out.id = "artifactOut"; v.appendChild(out);
+    } else if (state.tab === "chat") {
+      const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/conversation");
+      v.innerHTML = "";
+      const log = document.createElement("pre");
+      log.textContent = d.messages.map(m => "[" + m.role + "] " + m.content).join("\n\n") || "(暂无对话)";
+      v.appendChild(log);
+    }
+  } catch (e) {
+    v.innerHTML = ""; const p = document.createElement("p"); p.className = "err";
+    p.textContent = e.message; v.appendChild(p);
+  }
+}
+
+async function viewArtifact(path){
+  const out = $("#artifactOut"); if (!out) return;
+  out.textContent = "加载中…";
+  try {
+    const d = await api("/api/projects/" + encodeURIComponent(state.pid)
+      + "/artifact-content?path=" + encodeURIComponent(path));
+    out.textContent = d.binary ? "(二进制文件，不展示)"
+      : (d.content + (d.truncated ? "\n…(已截断)" : ""));   // textContent：AI 产物原样，不当 HTML
+  } catch (e) { out.textContent = e.message; }
+}
+
+for (const b of document.querySelectorAll(".tabs button")) {
+  b.onclick = () => {
+    state.tab = b.dataset.tab;
+    for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("active", x === b);
+    render();
+  };
+}
+$("#connect").onclick = () => {
+  state.token = $("#token").value.trim();
+  sessionStorage.setItem("autocode_token", state.token);
+  loadProjects();
+};
+// 启动：从 sessionStorage 恢复（不从 URL 取 token，避免进浏览器历史/代理日志）
+state.token = sessionStorage.getItem("autocode_token") || "";
+if (state.token) { $("#token").value = state.token; loadProjects(); }
+</script>
+</body>
+</html>
