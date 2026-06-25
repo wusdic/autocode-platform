@@ -71,6 +71,15 @@ printf '%s\n' "${CP_TOKEN}" > "${PLATFORM_HOME}/.platform_token"
 printf 'PLATFORM_TOKEN=%s\nPLATFORM_DATA_ROOT=%s\n' "${CP_TOKEN}" "${PLATFORM_DATA_ROOT}" \
   > "${PLATFORM_HOME}/.platform_token.env"
 chmod 600 "${PLATFORM_HOME}/.platform_token" "${PLATFORM_HOME}/.platform_token.env"
+# 控制平面绑定地址：默认仅本机 127.0.0.1（最安全）。要让局域网其它 IP 访问 CEO 交互页，
+# 设 PLATFORM_BIND_HOST=0.0.0.0（或指定网卡 IP）。⚠️ 控制平面对外鉴权只有 X-Token、且无 TLS，
+# 仅适合【可信局域网】；跨不可信网络/公网请前置 nginx/Caddy 做 TLS。注意：这只放开控制平面，
+# 各项目的 Hermes /v1 网关仍只绑本机（安全红线，绝不对外）。
+BIND_HOST="${PLATFORM_BIND_HOST:-127.0.0.1}"
+case "${BIND_HOST}" in
+  127.0.0.1|localhost|::1) : ;;
+  *) echo "⚠️ 控制平面将绑定 ${BIND_HOST}（局域网可访问）。鉴权仅 X-Token、无 TLS——仅限可信局域网。" ;;
+esac
 HERMES_BIN_DIR="$(dirname "$(command -v hermes 2>/dev/null || echo /usr/bin/hermes)")"
 UNIT_DIR="${HOME}/.config/systemd/user"; mkdir -p "${UNIT_DIR}"
 cat > "${UNIT_DIR}/autocode-control-plane.service" <<UNIT
@@ -84,7 +93,8 @@ WorkingDirectory=${PLATFORM_HOME}
 EnvironmentFile=${PLATFORM_HOME}/.platform_token.env
 Environment=XDG_RUNTIME_DIR=%t
 Environment=PATH=${HERMES_BIN_DIR}:${PLATFORM_HOME}/venv/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=${PLATFORM_HOME}/venv/bin/uvicorn control_plane:app --app-dir ${PLATFORM_HOME} --host 127.0.0.1 --port 9000
+Environment=PLATFORM_BIND_HOST=${BIND_HOST}
+ExecStart=${PLATFORM_HOME}/venv/bin/uvicorn control_plane:app --app-dir ${PLATFORM_HOME} --host ${BIND_HOST} --port 9000
 Restart=always
 RestartSec=3
 
@@ -160,8 +170,11 @@ done
 
 cat <<NEXT
 
-✅ 部署完成。控制平面已作为 systemd 服务运行在 127.0.0.1:9000。
+✅ 部署完成。控制平面已作为 systemd 服务运行在 ${BIND_HOST}:9000。
    PLATFORM_TOKEN 见 ${PLATFORM_HOME}/.platform_token
+   CEO 交互页：浏览器开 http://${BIND_HOST}:9000/（填 PLATFORM_TOKEN）。
+     局域网其它机器访问：部署时设 PLATFORM_BIND_HOST=0.0.0.0，再用 http://<本机局域网IP>:9000/
+     （查本机 IP：hostname -I）。⚠️ 仅 X-Token 鉴权、无 TLS——仅限可信局域网。
    状态：systemctl --user status autocode-control-plane.service
    自动化循环（已装并启用）：
      systemctl --user list-timers 'autocode-*'

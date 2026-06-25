@@ -55,6 +55,27 @@ def test_auth_rejects_bad_token(client):
     assert r.status_code == 401
 
 
+def test_lan_bind_refuses_default_token(tmp_path, monkeypatch):
+    # 绑非本机地址 + 默认 token 'change-me' → 拒绝启动（防裸奔到局域网）
+    monkeypatch.setenv("PLATFORM_BIND_HOST", "0.0.0.0")
+    bad = cp.Settings(token="change-me", base_port=9000, data_root=str(tmp_path))
+    with pytest.raises(RuntimeError):
+        cp.create_app(settings=bad, gateway=FakeGateway(bad))
+
+
+def test_lan_bind_ok_with_real_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLATFORM_BIND_HOST", "0.0.0.0")
+    ok = cp.Settings(token="real-secret", base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=ok, gateway=FakeGateway(ok))   # 不应抛
+    assert app is not None
+
+
+def test_localhost_bind_allows_default_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLATFORM_BIND_HOST", "127.0.0.1")
+    s = cp.Settings(token="change-me", base_port=9000, data_root=str(tmp_path))
+    assert cp.create_app(settings=s, gateway=FakeGateway(s)) is not None
+
+
 # --- D18：建项目失败要回滚端口、回 502，不泄漏孤儿端口 ----------------------------
 def test_create_project_rolls_back_on_launch_failure(tmp_path):
     class FailingGateway(FakeGateway):

@@ -3,7 +3,9 @@
 对应《01-最终设计方案.md》第 8 节、《02-从零开始操作手册.md》阶段 4。
 
 安全红线：Hermes 的 /v1/* 与 dashboard 绝不直接对外；对外鉴权全在本网关。
-本网关只绑 127.0.0.1，生产环境前面架 nginx/Caddy 做 TLS + 对外鉴权。
+本网关默认只绑 127.0.0.1；要让局域网访问 CEO 交互页，设 ``PLATFORM_BIND_HOST=0.0.0.0``
+（仅 X-Token 鉴权、无 TLS，仅限可信局域网；非本机地址 + 默认 token 会被拒绝启动）。
+跨不可信网络/公网须前置 nginx/Caddy 做 TLS。注意：各项目的 Hermes ``/v1`` 网关始终只绑本机。
 
 相对手册原稿的改进：
   * 修复 ``PROJECTS.get(pid) or HTTPException(404)`` 不抛异常的 bug，统一用
@@ -332,6 +334,13 @@ def create_app(
     gateway: Optional[HermesGateway] = None,
 ) -> FastAPI:
     settings = settings or Settings()
+    # 安全闸：绑定到非本机地址（局域网/公网）时，绝不允许沿用默认 token 'change-me'——
+    # 否则等于把建项目/对话/读产物的能力裸奔给整个网络。设 PLATFORM_TOKEN 后再开放。
+    _bind = os.environ.get("PLATFORM_BIND_HOST", "127.0.0.1")
+    if _bind not in ("127.0.0.1", "localhost", "::1") and settings.token == "change-me":
+        raise RuntimeError(
+            f"拒绝以默认 token 'change-me' 绑定非本机地址 ({_bind})：请先设 PLATFORM_TOKEN 再开放到局域网"
+            "（控制平面仅 X-Token 鉴权、无 TLS，仅限可信局域网）。")
     registry = registry or ProjectRegistry()
     gateway = gateway or HermesGateway(settings)
     ports = PortAllocator(settings.data_root, settings.base_port)

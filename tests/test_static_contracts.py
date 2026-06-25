@@ -331,6 +331,16 @@ def test_webui_guards_new_requirement_and_can_create_project():
     assert "function createProject" in html and "newproj" in html  # 可新建项目
 
 
+def test_control_plane_bind_host_configurable_and_guarded():
+    # 局域网访问：bind host 可配 + 非本机+默认 token 拒绝启动
+    t = read("platform/control_plane.py")
+    assert "PLATFORM_BIND_HOST" in t and "change-me" in t
+    deploy = read("scripts/01-deploy-platform.sh")
+    assert "PLATFORM_BIND_HOST" in deploy and "--host ${BIND_HOST}" in deploy
+    # 安全红线：项目 Hermes 网关不随之放开（文档明确仅控制平面）
+    assert "Hermes" in read("README.md")
+
+
 def test_control_plane_sets_csp_for_webui():
     t = read("platform/control_plane.py")
     assert "Content-Security-Policy" in t and "connect-src 'self'" in t
