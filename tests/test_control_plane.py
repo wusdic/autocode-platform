@@ -155,6 +155,36 @@ def test_conversation_reads_platform_jsonl(client):
     assert "user" in roles and "assistant" in roles
 
 
+def test_message_rejects_traversal_session_id(client):
+    _mk(client)
+    r = client.post("/api/projects/proj1/messages",
+                    json={"message": "x", "session_id": "../../etc/cron"}, headers=_h())
+    assert r.status_code == 400
+    # 确认没在 conversations 目录外落文件
+    from pathlib import Path
+    assert not (Path(client.data_root) / "proj1" / "etc").exists()
+
+
+def test_conversation_rejects_traversal_session_id(client):
+    _mk(client)
+    r = client.get("/api/projects/proj1/conversation",
+                   params={"session_id": "../../../secret"}, headers=_h())
+    assert r.status_code == 400
+
+
+def test_message_returns_502_when_ceo_unreachable(tmp_path):
+    class DownGateway(FakeGateway):
+        async def chat(self, project, message, session_id):
+            raise RuntimeError("connection refused")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=DownGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.post("/api/projects/proj1/messages",
+               json={"message": "hi", "session_id": "main"}, headers=_h())
+    assert r.status_code == 502 and "CEO" in r.json()["detail"]
+
+
 def test_create_and_duplicate_project(client):
     r = client.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
     assert r.status_code == 200

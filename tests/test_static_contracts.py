@@ -303,6 +303,20 @@ def test_webui_is_xss_safe():
     assert ".innerHTML = d.content" not in html and "innerHTML=md" not in html
 
 
+def test_webui_can_send_to_ceo():
+    # CEO 对话页必须能【发消息】，不只是只读（设计目标：用户经网关对接 CEO）
+    html = read("platform/webui.html")
+    assert "function sendMessage" in html
+    assert '"POST"' in html and "/messages" in html
+
+
+def test_control_plane_validates_session_id():
+    t = read("platform/control_plane.py")
+    assert "validate_session_id" in t and "SESSION_ID_RE" in t
+    # 消息端点对 CEO 网关失败要回 502 而非泛化 500
+    assert "CEO 网关无响应" in t
+
+
 def test_control_plane_sets_csp_for_webui():
     t = read("platform/control_plane.py")
     assert "Content-Security-Policy" in t and "connect-src 'self'" in t

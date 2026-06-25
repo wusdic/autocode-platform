@@ -10,7 +10,8 @@
   body { margin:0; font:14px/1.5 system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--fg); }
   header { padding:10px 16px; background:var(--panel); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   header h1 { font-size:16px; margin:0; }
-  input,button,select { font:inherit; background:#11141a; color:var(--fg); border:1px solid #2a2f3a; border-radius:6px; padding:6px 10px; }
+  input,button,select,textarea { font:inherit; background:#11141a; color:var(--fg); border:1px solid #2a2f3a; border-radius:6px; padding:6px 10px; }
+  textarea { resize:vertical; }
   button { cursor:pointer; }
   button:hover { border-color:var(--acc); }
   main { display:grid; grid-template-columns:260px 1fr; gap:0; height:calc(100vh - 52px); }
@@ -62,10 +63,15 @@ function esc(s){ return String(s==null?"":s)
   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
   .replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
 
-async function api(path){
-  const r = await fetch(path, { headers: { "X-Token": state.token } });
+async function api(path, method="GET", body=null){
+  const opts = { method, headers: { "X-Token": state.token } };
+  if (body != null) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
   if (r.status === 401) throw new Error("token 无效 (401)");
-  if (!r.ok) throw new Error(path + " → " + r.status);
+  if (!r.ok) {
+    let d = ""; try { d = (await r.json()).detail || ""; } catch (e) {}
+    throw new Error(path + " → " + r.status + (d ? ": " + d : ""));
+  }
   return r.json();
 }
 
@@ -115,11 +121,7 @@ async function render(){
       v.appendChild(ul);
       const out = document.createElement("pre"); out.id = "artifactOut"; v.appendChild(out);
     } else if (state.tab === "chat") {
-      const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/conversation");
-      v.innerHTML = "";
-      const log = document.createElement("pre");
-      log.textContent = d.messages.map(m => "[" + m.role + "] " + m.content).join("\n\n") || "(暂无对话)";
-      v.appendChild(log);
+      await renderChat(v);
     }
   } catch (e) {
     v.innerHTML = ""; const p = document.createElement("p"); p.className = "err";
@@ -136,6 +138,48 @@ async function viewArtifact(path){
     out.textContent = d.binary ? "(二进制文件，不展示)"
       : (d.content + (d.truncated ? "\n…(已截断)" : ""));   // textContent：AI 产物原样，不当 HTML
   } catch (e) { out.textContent = e.message; }
+}
+
+// 与 CEO 多轮对话：左侧选项目后，在此发需求/沟通。CEO 是唯一对话入口（设计目标）。
+async function renderChat(v){
+  v.innerHTML = "";
+  const log = document.createElement("div"); log.id = "chatLog";
+  log.style.cssText = "white-space:pre-wrap;overflow:auto;max-height:62vh;border:1px solid #2a2f3a;"
+    + "border-radius:6px;padding:12px;background:#0b0d12;margin-bottom:8px";
+  v.appendChild(log);
+  const row = document.createElement("div"); row.className = "row";
+  const ta = document.createElement("textarea");
+  ta.id = "chatInput"; ta.rows = 2; ta.style.flex = "1";
+  ta.placeholder = "对 CEO 说需求/追问…（Ctrl+Enter 发送；CEO 较慢，请耐心等）";
+  const btn = document.createElement("button"); btn.id = "chatSend"; btn.textContent = "发送";
+  row.appendChild(ta); row.appendChild(btn); v.appendChild(row);
+  btn.onclick = sendMessage;
+  ta.addEventListener("keydown", e => { if (e.ctrlKey && e.key === "Enter") sendMessage(); });
+  await loadConversation();
+  ta.focus();
+}
+async function loadConversation(){
+  const log = $("#chatLog"); if (!log) return;
+  try {
+    const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/conversation");
+    // textContent 渲染对话（含 AI 回复）——绝不解析 HTML，杜绝存储型 XSS
+    log.textContent = d.messages.map(m => "[" + m.role + "] " + m.content).join("\n\n")
+      || "(暂无对话，向 CEO 发第一条需求)";
+    log.scrollTop = log.scrollHeight;
+  } catch (e) { log.textContent = e.message; }
+}
+async function sendMessage(){
+  const ta = $("#chatInput"), btn = $("#chatSend");
+  const msg = (ta.value || "").trim(); if (!msg) return;
+  btn.disabled = true; const old = btn.textContent; btn.textContent = "发送中…";
+  try {
+    await api("/api/projects/" + encodeURIComponent(state.pid) + "/messages",
+              "POST", { message: msg, session_id: "main" });
+    ta.value = "";
+    await loadConversation();
+  } catch (e) {
+    const log = $("#chatLog"); if (log) log.textContent += "\n\n[发送失败] " + e.message;
+  } finally { btn.disabled = false; btn.textContent = old; }
 }
 
 for (const b of document.querySelectorAll(".tabs button")) {

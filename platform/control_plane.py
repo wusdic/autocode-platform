@@ -35,6 +35,9 @@ except ImportError:  # pragma: no cover
 
 # 严格 slug：防止 project_id 路径穿越 / systemd 单元名污染。
 PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+# session_id 会进文件名（conversations/<sid>.jsonl）与 X-Hermes-Session-Key 头——必须收口，
+# 否则 "../../x" 可路径穿越写/读 workspace 外文件，含换行可注入 header。
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def validate_project_id(pid: str) -> None:
@@ -43,6 +46,11 @@ def validate_project_id(pid: str) -> None:
             400,
             "invalid project_id; must match ^[a-z0-9][a-z0-9_-]{2,63}$",
         )
+
+
+def validate_session_id(sid: str) -> None:
+    if not SESSION_ID_RE.match(sid or ""):
+        raise HTTPException(400, "invalid session_id; must match ^[A-Za-z0-9_-]{1,64}$")
 
 
 # --------------------------------------------------------------------------- #
@@ -373,9 +381,14 @@ def create_app(
     @app.post("/api/projects/{pid}/messages")
     async def message_ceo(pid: str, body: Msg, x_token: str = Header(None)):
         auth(x_token)
+        validate_session_id(body.session_id)
         project = get_project(pid)
         _log_turn(project, body.session_id, "user", body.message)
-        reply = await gateway.chat(project, body.message, body.session_id)
+        try:
+            reply = await gateway.chat(project, body.message, body.session_id)
+        except Exception as exc:
+            # CEO gateway 宕/超时/网络错误：回明确 502 而非泛化 500（用户消息已记，下次可重发）。
+            raise HTTPException(502, f"CEO 网关无响应: {exc}")
         try:
             text = reply["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -611,6 +624,7 @@ def create_app(
     @app.get("/api/projects/{pid}/conversation")
     def get_conversation(pid: str, session_id: str = Query("main"), x_token: str = Header(None)):
         auth(x_token)
+        validate_session_id(session_id)
         project = get_project(pid)
         # 只读平台自有 JSONL（见 message_ceo 的 _log_turn），不猜 Hermes 内部 sqlite。
         f = Path(project.workspace) / ".autocode" / "conversations" / f"{session_id}.jsonl"
