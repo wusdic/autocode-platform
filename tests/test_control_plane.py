@@ -55,6 +55,39 @@ def test_auth_rejects_bad_token(client):
     assert r.status_code == 401
 
 
+# --- D18：建项目失败要回滚端口、回 502，不泄漏孤儿端口 ----------------------------
+def test_create_project_rolls_back_on_launch_failure(tmp_path):
+    class FailingGateway(FakeGateway):
+        def launch(self, pid, port):
+            raise RuntimeError("disk full")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    gw = FailingGateway(settings)
+    app = cp.create_app(settings=settings, gateway=gw)
+    c = TestClient(app)
+    r = c.post("/api/projects", json={"project_id": "projx"}, headers=_h())
+    assert r.status_code == 502 and "disk full" in r.json()["detail"]
+    # 端口已回滚：.ports.json 不应残留 projx
+    import json as _j
+    ports = _j.loads((tmp_path / ".ports.json").read_text())
+    assert "projx" not in ports.get("assigned", {})
+
+
+# --- D20：单个项目 kanban 超时/失败不应让 /api/projects 整体 500 ------------------
+def test_list_projects_survives_kanban_error(tmp_path):
+    class HangingGateway(FakeGateway):
+        def kanban(self, project, *args):
+            raise RuntimeError("hermes kanban timed out after 15s")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    gw = HangingGateway(settings)
+    app = cp.create_app(settings=settings, gateway=gw)
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.get("/api/projects", headers=_h())
+    assert r.status_code == 200
+    p = next(p for p in r.json()["projects"] if p["project_id"] == "proj1")
+    assert p["task_summary"] == {} and p["total_tasks"] == 0
+
+
 # --- 用户面只读端点（Web UI 后端）-------------------------------------------------
 def _mk(client, pid="proj1"):
     client.post("/api/projects", json={"project_id": pid}, headers=_h())

@@ -306,3 +306,15 @@ def test_webui_is_xss_safe():
 def test_control_plane_sets_csp_for_webui():
     t = read("platform/control_plane.py")
     assert "Content-Security-Policy" in t and "connect-src 'self'" in t
+
+
+# --- 第六轮 D18：建项目失败回滚端口（PortAllocator.release）+ 回 502 ---------------
+def test_create_project_has_rollback():
+    t = read("platform/control_plane.py")
+    assert "def release(" in t and "ports.release(" in t
+
+
+# --- 第六轮 D20：kanban 子进程加超时，避免单项目卡死阻塞列表 ----------------------
+def test_kanban_subprocess_has_timeout():
+    t = read("platform/control_plane.py")
+    assert "TimeoutExpired" in t and "KANBAN_TIMEOUT" in t

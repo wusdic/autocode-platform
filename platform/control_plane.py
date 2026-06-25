@@ -127,6 +127,25 @@ class PortAllocator:
                 if fcntl is not None:
                     fcntl.flock(lockf, fcntl.LOCK_UN)
 
+    def release(self, pid: str) -> None:
+        """回收某 pid 的端口分配（建项目失败时回滚，避免端口泄漏/孤儿占用，D16/D18）。
+
+        只删 ``assigned`` 条目，不回退 ``next``（保持单调递增，避免与并发分配竞争撞端口）。
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(".lock")
+        with open(lock_path, "w") as lockf:
+            if fcntl is not None:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            try:
+                state = self._load()
+                if state["assigned"].pop(pid, None) is not None:
+                    self._path.write_text(json.dumps(state, indent=2))
+                    self._state = state
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lockf, fcntl.LOCK_UN)
+
 
 # --------------------------------------------------------------------------- #
 # 项目注册表（内存实现；生产替换为 Postgres）
@@ -237,7 +256,12 @@ class HermesGateway:
         """
         env = dict(os.environ, HERMES_HOME=project.home)
         cmd = ["hermes", "kanban", "--board", project.project_id, *args]
-        out = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        # 加超时（D20）：单个 hermes kanban 卡住不应阻塞 /api/projects 列表（它会逐项目调用）。
+        try:
+            out = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                                 timeout=int(os.environ.get("KANBAN_TIMEOUT", "15")))
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"hermes kanban timed out after {exc.timeout}s") from exc
         if out.returncode != 0:
             raise RuntimeError(f"hermes kanban failed: {out.stderr.strip() or out.stdout.strip()}")
         try:
@@ -324,7 +348,14 @@ def create_app(
         if body.project_id in registry:
             raise HTTPException(409, f"project '{body.project_id}' already exists")
         port = ports.allocate(body.project_id)
-        project = gateway.launch(body.project_id, port)
+        try:
+            project = gateway.launch(body.project_id, port)
+        except Exception as exc:
+            # 建项目失败（launch_project.sh 非 0：磁盘不足/缺 key/docker 不可用等）：
+            # 回滚端口分配，避免端口泄漏成孤儿占用（D16/D18），并回明确 502 而非泛化 500。
+            ports.release(body.project_id)
+            detail = exc.stderr.strip() if hasattr(exc, "stderr") and exc.stderr else str(exc)
+            raise HTTPException(502, f"failed to create project '{body.project_id}': {detail}")
         registry.add(project)
         return {"project_id": project.project_id, "port": project.port, "status": "ready"}
 

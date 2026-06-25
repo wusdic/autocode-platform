@@ -29,7 +29,11 @@ if ! command -v docker >/dev/null 2>&1; then
     sudo systemctl enable --now docker || true
   fi
   sudo usermod -aG docker "$USER"
-  echo "已把 $USER 加入 docker 组，请重新登录或执行 'newgrp docker' 使其生效。"
+  echo "已把 $USER 加入 docker 组。⚠️ 新组权限不会被【已在跑的 user systemd 实例】继承（D11）——"
+  echo "   gateway 是 user service，须让 user systemd 重新拿到 docker 组才能访问 Docker。三选一："
+  echo "     1) 重新登录（最干净）；"
+  echo "     2) newgrp docker（仅当前 shell 生效，适合接着手动跑部署）；"
+  echo "     3) sudo systemctl restart user@\$(id -u).service（重启整个 user systemd 实例）。"
 fi
 # 国内网络可设 DOCKER_REGISTRY_MIRROR（如 https://docker.1ms.run）解决 Docker Hub 超时。
 if [ -n "${DOCKER_REGISTRY_MIRROR:-}" ]; then
