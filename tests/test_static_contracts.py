@@ -318,3 +318,12 @@ def test_create_project_has_rollback():
 def test_kanban_subprocess_has_timeout():
     t = read("platform/control_plane.py")
     assert "TimeoutExpired" in t and "KANBAN_TIMEOUT" in t
+
+
+# --- 模型可用性预检：建项目前对每个 provider+model 发请求，早发现 key/模型名错 -------
+def test_launcher_runs_model_preflight():
+    launcher = read("platform/launch_project.sh")
+    assert "AUTOCODE_MODEL_PREFLIGHT" in launcher and "check-models.sh" in launcher
+    pf = read("platform/check-models.sh")
+    # 命中真实预检逻辑：打 chat/completions，区分硬错误(鉴权/模型名)与限流(429 不阻断)
+    assert "chat/completions" in pf and "429" in pf

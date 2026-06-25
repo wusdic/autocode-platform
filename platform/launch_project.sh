@@ -40,6 +40,18 @@ for _k in ${REQUIRE_PROVIDER_KEYS}; do
   _has_key "$_k" || { echo "❌ 缺少供应商 key: ${_k}（写入 ~/.hermes/.env 或导出环境变量）"; exit 1; }
 done
 
+# 模型可用性预检（默认开）：对每个 provider+model 发一次最小请求，早发现 key 错/模型名错
+# （否则"双模型交叉质疑"会在流水线中途被某角色 401/模型不存在静默破坏）。硬错误（鉴权/模型名）
+# 拒绝建项目；限流(429)/网络仅警告不阻断（限流会自愈）。设 AUTOCODE_MODEL_PREFLIGHT=0 跳过。
+if [ "${AUTOCODE_MODEL_PREFLIGHT:-1}" = "1" ] && [ -f "${PLATFORM_HOME}/check-models.sh" ]; then
+  echo "==> [0.5/6] 模型可用性预检"
+  ZAI_BASE_URL="${ZAI_BASE_URL}" ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL}" \
+  ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL}" DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL}" \
+  DEEPSEEK_MODEL="${DEEPSEEK_MODEL}" \
+    bash "${PLATFORM_HOME}/check-models.sh" \
+    || { echo "❌ 模型预检失败，拒绝建项目（确认 key/模型名；临时跳过设 AUTOCODE_MODEL_PREFLIGHT=0）"; exit 1; }
+fi
+
 mkdir -p "${WORKSPACE}/design" "${WORKSPACE}/src"
 
 # 平台内部目录不进项目 git 历史（state/conversations/tools/worktree checkout），

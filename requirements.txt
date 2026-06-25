@@ -4,5 +4,8 @@ uvicorn>=0.27
 httpx>=0.27
 pydantic>=2.5
 pyyaml>=6.0            # launcher 用它把 terminal.docker_volumes 写成真正的 YAML 列表（Bug-1）
-psycopg2-binary>=2.9   # 生产化：注册表换 Postgres（阶段 13）
-redis>=5.0             # 生产化：事件总线用 Redis（阶段 13）
+
+# 以下属阶段 13 生产化（持久注册表 + 事件总线）。MVP 用内存注册表、代码未 import，**默认不装**，
+# 与 README/手册"Postgres/Redis 非 MVP 必须"一致。上生产时取消注释再 pip install：
+# psycopg2-binary>=2.9   # 注册表换 Postgres
+# redis>=5.0             # 事件总线用 Redis

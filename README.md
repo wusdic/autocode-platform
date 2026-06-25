@@ -8,6 +8,10 @@
 通过看板把任务派给一组命名角色 profile（产品 / 架构 / 研发 / 质控 / 变更管控），
 各角色用不同大模型协作与互相质疑；用户只通过自建的 Web/API 网关对接 CEO，其余全自动。
 
+> 架构提醒：**17 个角色是 profile（配置目录），不是 17 个进程/容器**——每项目一个 Hermes 进程，
+> dispatcher 按 `kanban.max_in_progress`（默认 3，<4 核自动降 1）派少量临时 worker；只有
+> dev-worker/qa/release 的 terminal 跑在短暂 Docker 容器里。故资源占用远低于"17×"的直觉。
+
 ## 设计文档
 
 - **[01-最终设计方案.md](01-最终设计方案.md)**：完整架构设计，包含五条底层原则、三层隔离模型、13 个角色权限表、需求双层结构、设计委员会多模型质疑机制、先设计再执行的双层硬拦、90 轮问题处理、风险规避表。
@@ -24,7 +28,8 @@ platform/
   qa_integrity.py       交付完整性校验（防"看板 done 但代码没落地"：提交/产物/占位/范围扫描）
   scope_guard.py        提交级范围审计（git diff 必须落在 allowed_paths 内，堵 terminal 绕过）
   webui.html            单文件 Web UI（控制平面 GET / 提供，转义渲染 + CSP，防存储型 XSS）
-  launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway
+  launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway（建前跑模型预检）
+  check-models.sh       模型可用性预检：每个 provider+model 发最小请求，早发现 key/模型名错
   orchestrator.py       状态机：产品→架构→dev→QA→release 全流程幂等编排（systemd timer 每分钟）
   watchdog.sh           异常续跑 + 熔断 + review 放行 + 限流暂停跳过（不做正常编排，归 orchestrator）
   monitor.sh            健康监测+告警：gateway/卡死/权限漂移/日志/磁盘/Docker属主/余额/限流/策略降级
