@@ -65,7 +65,11 @@ def worktrees_present(ws: Path) -> bool:
 
 
 def _iter_src(ws: Path):
-    skip = {".git", ".worktrees", ".autocode", "design", "reports"}
+    # 注意 **不排除 .worktrees**：worktree 并行流里，dev 产物在 release 合并前都还在
+    # 各 feature 分支的 worktree 工作树里（main 工作树可能为空）。若排除 .worktrees，
+    # expected_files_present 在"起 release"时刻会误判为空 → 阻断 release → 整个并行流死锁。
+    # 同理 TODO 占位扫描也该看 worktree 里的待交付产物（DEV-4 store.py 留 TODO 的场景）。
+    skip = {".git", ".autocode", "design", "reports"}
     for p in ws.rglob("*.py"):
         if not any(part in skip for part in p.relative_to(ws).parts):
             yield p

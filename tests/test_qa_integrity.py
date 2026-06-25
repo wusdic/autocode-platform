@@ -62,6 +62,23 @@ def test_todo_markers_block_integrity():
     assert q.integrity_block_ok({}) is True  # 未提供不在此拦
 
 
+def test_release_ok_when_source_only_in_worktree(tmp_path):
+    # worktree 并行流：产物在 feature 分支的 worktree 里、main 工作树为空（release 才合并）。
+    # 起 release 时刻完整性闸门不得因 main 没文件而误拦（否则并行流死锁）。
+    _init_repo(tmp_path)  # main 仅 init 提交，无 src
+    (tmp_path / ".worktrees").mkdir(exist_ok=True)
+    wt = tmp_path / ".worktrees" / "impl"
+    _git(tmp_path, "worktree", "add", "-q", "-b", "feat-impl", str(wt), "main")
+    (wt / ".autocode_task_id").write_text("t_impl0001")
+    (tmp_path / "design" / "allowed_paths.t_impl0001.txt").write_text("src/\n")
+    (wt / "src").mkdir()
+    (wt / "src" / "main.py").write_text("print(1)\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "feat: impl")
+    ok, reason = q.min_release_ok(tmp_path, dev_done=True, status={"release_allowed": True})
+    assert ok is True, reason
+
+
 def test_scope_violation_blocks_release(tmp_path):
     # 在 worktree 里提交 allowed_paths 外的文件 → min_release_ok 应拦（terminal 绕过场景）
     _init_repo(tmp_path)
