@@ -38,6 +38,7 @@
   <h1>Autocode 控制台</h1>
   <input id="token" type="password" placeholder="X-Token" size="22">
   <button id="connect">连接</button>
+  <button id="newproj" title="新业务请新建独立项目（一个项目=一个核心需求）">+ 新建项目</button>
   <span id="status" class="mut">未连接</span>
 </header>
 <main>
@@ -168,9 +169,19 @@ async function loadConversation(){
     log.scrollTop = log.scrollHeight;
   } catch (e) { log.textContent = e.message; }
 }
+// 疑似"新业务/新需求"的措辞——平台是"一个项目=一个核心需求"，新业务应新建项目，
+// 不该混进当前项目对话（否则污染本项目的 core_need 与流水线）。命中则二次确认。
+const NEW_REQ_RE = /(新需求|新项目|新业务|另(外|起)|再(做|写|开发|来)(一?个)?|帮我(做|写|开发|搞)(一?个)?|做(一?个)|写(一?个)|开发(一?个)|换(个|成)|另一个)/;
 async function sendMessage(){
   const ta = $("#chatInput"), btn = $("#chatSend");
   const msg = (ta.value || "").trim(); if (!msg) return;
+  if (NEW_REQ_RE.test(msg)) {
+    const go = confirm(
+      "这看起来像一个【新需求/新业务】。\n\n本平台一个项目对应一个核心需求(core_need)——" +
+      "新业务请点右上角【+ 新建项目】单独做，不要混进当前项目，否则会污染本项目的需求与流水线。\n\n" +
+      "若这只是【完善当前项目】的需求，点“确定”继续发送；否则点“取消”去新建项目。");
+    if (!go) return;
+  }
   btn.disabled = true; const old = btn.textContent; btn.textContent = "发送中…";
   try {
     await api("/api/projects/" + encodeURIComponent(state.pid) + "/messages",
@@ -189,6 +200,17 @@ for (const b of document.querySelectorAll(".tabs button")) {
     render();
   };
 }
+async function createProject(){
+  if (!state.token) { alert("请先填 token 连接"); return; }
+  const id = (prompt("新建项目 ID（小写字母/数字/-/_，3–64 位）。\n一个项目对应一个核心需求；新业务用新项目：") || "").trim();
+  if (!id) return;
+  try {
+    await api("/api/projects", "POST", { project_id: id });
+    state.pid = id; state.tab = "chat";
+    await loadProjects(); render();
+  } catch (e) { alert("创建失败：" + e.message); }
+}
+$("#newproj").onclick = createProject;
 $("#connect").onclick = () => {
   state.token = $("#token").value.trim();
   sessionStorage.setItem("autocode_token", state.token);

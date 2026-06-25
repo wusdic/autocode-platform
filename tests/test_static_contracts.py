@@ -317,6 +317,20 @@ def test_control_plane_validates_session_id():
     assert "CEO 网关无响应" in t
 
 
+def test_ceo_soul_forbids_coding_and_routes_pipeline():
+    soul = read("platform-base/templates/SOUL.ceo.md")
+    # CEO 绝不自己交付代码、一切走流水线
+    assert "绝不" in soul and "流水线" in soul
+    # 新业务 → 新建独立项目（一个项目=一个核心需求）
+    assert "新建一个独立项目" in soul and "core_need" in soul
+
+
+def test_webui_guards_new_requirement_and_can_create_project():
+    html = read("platform/webui.html")
+    assert "NEW_REQ_RE" in html and "confirm(" in html        # 新需求二次确认
+    assert "function createProject" in html and "newproj" in html  # 可新建项目
+
+
 def test_control_plane_sets_csp_for_webui():
     t = read("platform/control_plane.py")
     assert "Content-Security-Policy" in t and "connect-src 'self'" in t
