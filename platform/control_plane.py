@@ -16,10 +16,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import subprocess
+import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -346,7 +349,40 @@ def create_app(
     ports = PortAllocator(settings.data_root, settings.base_port)
     rehydrate(registry, settings)
 
-    app = FastAPI(title="Auto-Coding Control Plane")
+    @asynccontextmanager
+    async def _lifespan(_app):
+        # 内嵌编排器（可靠地推进流水线）。真机 shi 暴露：systemd --user timer 重启后失效
+        # （"Failed to connect to bus"），orchestrator 不自动跑、流水线全靠人工 tick。控制平面是
+        # 常驻 systemd 服务、最可靠的进程，故把 orchestrator tick 内嵌进来：
+        #   * 仅当 AUTOCODE_EMBEDDED_ORCHESTRATOR=1 才开（部署写入；测试不设→不启动，零副作用）；
+        #   * 跨进程 tick_lock 与 systemd timer 互斥，绝不双跑；
+        #   * tick_all 是同步 subprocess 逻辑，用 asyncio.to_thread 跑，不阻塞事件循环；关停时 cancel。
+        task = None
+        if os.environ.get("AUTOCODE_EMBEDDED_ORCHESTRATOR", "0") == "1":
+            from orchestrator import Orchestrator, tick_lock
+            interval = int(os.environ.get("ORCHESTRATOR_INTERVAL_SECONDS", "60"))
+
+            def _tick_once():
+                with tick_lock(settings.data_root) as got:
+                    if got:
+                        Orchestrator(gateway, data_root=settings.data_root).tick_all()
+
+            async def _loop():
+                while True:
+                    try:
+                        await asyncio.to_thread(_tick_once)
+                    except Exception as exc:
+                        print(f"[orchestrator] embedded tick error: {exc}", file=sys.stderr)
+                    await asyncio.sleep(interval)
+
+            task = asyncio.create_task(_loop())
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+
+    app = FastAPI(title="Auto-Coding Control Plane", lifespan=_lifespan)
 
     def auth(token: Optional[str]) -> None:
         if token != settings.token:
@@ -410,14 +446,27 @@ def create_app(
                            x_token: str = Header(None)):
         auth(x_token)
         project = get_project(pid)
-        # 闭环：先把用户确认的需求双层结构落盘为 requirements.yaml（CEO 无 file 工具，
-        # 写不了；产品委员会 swarm 又以它为输入），再启动 swarm。
+        ws = Path(project.workspace)
+        # 幂等：产品委员会/架构委员会已起过就不重复起（用户多点几次"确认需求"不应起多个 swarm）。
+        state_path = ws / ".autocode" / "state.json"
+        state: dict = {}
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+            except (ValueError, OSError):
+                state = {}
+        if state.get("product_started") or state.get("arch_started"):
+            return {"status": "already-started", "swarm": "product-council"}
+        # 闭环：先把用户确认的需求双层结构落盘为 requirements.yaml（CEO 无 file 工具写不了；
+        # 产品委员会 swarm 又以它为输入），写完立即 read-back 校验存在，再启动 swarm。
         if body and body.requirements:
-            design_dir = Path(project.workspace) / "design"
+            design_dir = ws / "design"
             design_dir.mkdir(parents=True, exist_ok=True)
-            (design_dir / "requirements.yaml").write_text(body.requirements)
-        # 显式编排：平台直接创建产品委员会 swarm，而非只 prompt CEO（见手册阶段 7）。
-        # 架构委员会在 PRD 产出后由 dispatcher / change-guardian 衔接。
+            req_path = design_dir / "requirements.yaml"
+            req_path.write_text(body.requirements)
+            if not req_path.exists():
+                raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
+        # 显式编排：平台直接创建产品委员会 swarm（见手册阶段 7）。
         gateway.swarm(
             project,
             goal="产出 PRD：基于 design/requirements.yaml 的 core_need",
@@ -425,7 +474,14 @@ def create_app(
             verifier="pm-critic",
             synthesizer="pm-synthesizer",
         )
-        # 同时通知 CEO 跟进推进到 core_need 达成。
+        # 落 product_started（与 orchestrator 共享 state，互相幂等去重）。
+        state.update(product_started=True, stage="product")
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        # 系统消息写进对话（用户在 Web UI 能看到"已确认、产品委员会已启动"）。
+        _log_turn(project, "main", "system", "✅ 已确认需求，产品委员会 swarm 已启动，开始产出 PRD。")
+        # 通知 CEO 跟进。
         reply = await gateway.chat(
             project,
             "用户已确认需求双层结构，产品委员会 swarm 已启动；请跟进设计与构建直至 core_need 达成。",
@@ -527,6 +583,56 @@ def create_app(
         project = get_project(pid)
         src = Path(project.workspace) / "src"
         return {"demo_path": str(src), "exists": src.exists()}
+
+    @app.get("/api/projects/{pid}/deliverable")
+    def deliverable(pid: str, x_token: str = Header(None)):
+        auth(x_token)
+        project = get_project(pid)
+        ws = Path(project.workspace)
+        # is_done 必须四者皆满足，而不只看 QA release_allowed：阶段 complete + 发布清单存在 +
+        # QA 放行 + 交付完整性通过。任一缺失即视为未真正交付。
+        state = {}
+        sp = ws / ".autocode" / "state.json"
+        if sp.exists():
+            try:
+                state = json.loads(sp.read_text())
+            except (ValueError, OSError):
+                pass
+        manifest = None
+        mf = ws / "reports" / "release" / "manifest.json"
+        if mf.exists():
+            try:
+                manifest = json.loads(mf.read_text())
+            except (ValueError, OSError):
+                manifest = None
+        qa = {}
+        qf = ws / "reports" / "qa" / "status.json"
+        if qf.exists():
+            try:
+                qa = json.loads(qf.read_text())
+            except (ValueError, OSError):
+                pass
+        integrity_ok = True
+        integ = (qa.get("integrity") or {}) if isinstance(qa, dict) else {}
+        if integ:
+            integrity_ok = bool(integ.get("git_clean", True) is True
+                                and integ.get("expected_files_present", True) is True
+                                and not integ.get("todo_markers")
+                                and not integ.get("scope_violations"))
+        is_done = bool(state.get("stage") == "complete" and manifest is not None
+                       and qa.get("release_allowed") is True and integrity_ok)
+        # 入口提示：优先用 manifest 的 run_command；否则扫常见入口文件（仅作 fallback 提示）。
+        run_command = manifest.get("run_command") if isinstance(manifest, dict) else None
+        if not run_command:
+            for cand in ("README.md", "src/main.py", "main.py", "run.sh", "package.json"):
+                if (ws / cand).exists():
+                    run_command = f"see {cand}"
+                    break
+        return {"is_done": is_done, "stage": state.get("stage", "created"),
+                "completion_mode": state.get("completion_mode"),
+                "manifest": manifest, "run_command": run_command,
+                "release_allowed": qa.get("release_allowed") if isinstance(qa, dict) else None,
+                "integrity_ok": integrity_ok}
 
     @app.get("/api/projects/{pid}/events")
     def events(pid: str, x_token: str = Header(None)):

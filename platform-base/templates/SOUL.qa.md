@@ -38,3 +38,11 @@ python "${GIT_REPO}/.autocode/tools/qa_integrity.py" "${GIT_REPO}"   # 输出 in
 
 若 `git_clean=false`、`expected_files_present=false`，或 `todo_markers` 非空（声称实现却留占位/TODO），
 **`release_allowed` 必须为 `false`**；声称的测试文件不存在时同样判 false。policy 插件与编排器会校验该块。
+
+**收尾自检（kanban_complete 前必须做，否则流水线会卡在 QA→release）**：真机 shi 暴露过"QA 完成但
+没写 status.json 导致流水线停摆"。完成前务必确认文件已落盘且是合法 JSON：
+
+```bash
+test -f reports/qa/status.json && python -m json.tool reports/qa/status.json >/dev/null \
+  && echo "status.json OK" || { echo "缺 status.json，先写再 complete"; exit 1; }
+```

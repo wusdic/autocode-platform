@@ -116,6 +116,36 @@ def _mk(client, pid="proj1"):
     return Path(client.data_root) / pid / "workspace"
 
 
+def test_confirm_plan_idempotent(client):
+    _mk(client)
+    r1 = client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core: x"}, headers=_h())
+    assert r1.status_code == 200 and r1.json()["status"] == "plan-confirmed"
+    n = len(client.gateway.swarms)
+    r2 = client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core: x"}, headers=_h())
+    assert r2.json()["status"] == "already-started"
+    assert len(client.gateway.swarms) == n   # 不重复起产品委员会
+
+
+def test_deliverable_not_done_without_manifest(client):
+    ws = _mk(client)
+    (ws / "reports" / "qa").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    r = client.get("/api/projects/proj1/deliverable", headers=_h())
+    assert r.status_code == 200 and r.json()["is_done"] is False   # 缺 manifest/complete
+
+
+def test_deliverable_done_with_all_conditions(client):
+    ws = _mk(client)
+    (ws / ".autocode").mkdir(parents=True, exist_ok=True)
+    (ws / ".autocode" / "state.json").write_text('{"stage": "complete", "completion_mode": "natural"}')
+    (ws / "reports" / "qa").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    (ws / "reports" / "release").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "release" / "manifest.json").write_text('{"version": "0.1.0", "run_command": "python src/main.py"}')
+    r = client.get("/api/projects/proj1/deliverable", headers=_h())
+    assert r.json()["is_done"] is True and r.json()["run_command"] == "python src/main.py"
+
+
 def test_list_projects_returns_created(client):
     _mk(client)
     r = client.get("/api/projects", headers=_h())

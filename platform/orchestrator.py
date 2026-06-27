@@ -25,9 +25,15 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+try:
+    import fcntl  # POSIX 文件锁；非 POSIX 平台退化为无锁
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 import qa_integrity
 from control_plane import HermesGateway, Project, Settings
@@ -44,6 +50,37 @@ def _done(card: dict) -> bool:
     """卡是否完成（容忍不同字段/取值）。"""
     status = str(card.get("status", "")).lower()
     return status in {"done", "completed", "complete"} or card.get("last_event") == "done"
+
+
+@contextmanager
+def tick_lock(data_root: str):
+    """跨进程互斥锁（`{data_root}/.orchestrator.lock`）。
+
+    保证 systemd timer 拉起的 orchestrator 与控制平面内嵌 loop **不并发 tick**，也防"慢 tick
+    与下一次 timer tick 重叠"导致同一项目状态 read-modify-write 竞争。拿不到锁就 yield False
+    （本轮跳过，下一轮再来；tick 本身幂等，跳过无害）。
+    """
+    p = Path(data_root)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    lockf = open(p / ".orchestrator.lock", "w")
+    got = True
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                got = False
+        yield got
+    finally:
+        if got and fcntl is not None:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        lockf.close()
 
 
 def provider_paused(data_root: str) -> bool:
@@ -89,8 +126,53 @@ class Orchestrator:
 
     @staticmethod
     def _approved(ws: Path) -> bool:
+        # canonical 文件，**不放宽**到 *approved*（否则 not-approved-yet.md 之类会误开 dev 闸）。
         f = ws / "design" / "approved_versions.txt"
         return f.exists() and bool([l for l in f.read_text().splitlines() if l.strip()])
+
+    @staticmethod
+    def _warn(ws: Path, payload: dict) -> None:
+        """非阻断告警落 .autocode/warnings.jsonl（monitor/Web UI 可展示）。"""
+        try:
+            d = ws / ".autocode"
+            d.mkdir(parents=True, exist_ok=True)
+            with (d / "warnings.jsonl").open("a", encoding="utf-8") as fh:
+                payload = dict(payload); payload["ts"] = _now()
+                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    @classmethod
+    def _design_doc(cls, ws: Path, canonical: str, kind: str) -> bool:
+        """检测设计产出文件。优先 canonical（design/PRD.md / design/ADR.md）；canonical 缺失时
+        容忍 agent 自由命名（design/*<kind>*.md），但落 noncanonical 警告——长期仍靠模板约束标准名。
+        """
+        if (ws / "design" / canonical).exists():
+            return True
+        design = ws / "design"
+        if design.exists():
+            for f in sorted(design.glob("*.md")):
+                if kind in f.name.lower():
+                    cls._warn(ws, {"type": "noncanonical_design_filename",
+                                   "kind": kind, "file": f"design/{f.name}"})
+                    return True
+        return False
+
+    @staticmethod
+    def _release_manifest_ok(ws: Path) -> bool:
+        """release 必须产出 reports/release/manifest.json，complete 以它为准（而非仅 release 卡 done）。"""
+        f = ws / "reports" / "release" / "manifest.json"
+        if not f.exists():
+            return False
+        try:
+            return isinstance(json.loads(f.read_text()), dict)
+        except (ValueError, OSError):
+            return False
+
+    @staticmethod
+    def _qa_cards_done(cards: list) -> bool:
+        qa = [c for c in cards if str(c.get("assignee", "")) == "qa"]
+        return bool(qa) and all(_done(c) for c in qa)
 
     @staticmethod
     def _qa_status(ws: Path) -> dict:
@@ -125,17 +207,30 @@ class Orchestrator:
         paused = provider_paused(self.data_root)
         changed = False
 
+        adr_present = self._design_doc(ws, "ADR.md", "adr")
+
         # 1) PRD 产出 → 起架构委员会 swarm（限流暂停期不起）
-        if (ws / "design" / "PRD.md").exists() and not state.get("arch_started") and not paused:
+        if self._design_doc(ws, "PRD.md", "prd") and not state.get("arch_started") and not paused:
             self.gw.swarm(project, ARCH_GOAL, ARCH_WORKERS, "arch-critic", "arch-synthesizer")
             state.update(arch_started=True, stage="architecture"); changed = True
 
         # 2) ADR + 开闸钥匙 → 让 dev-lead 切编码任务（限流暂停期不起新工作）
-        if (ws / "design" / "ADR.md").exists() and self._approved(ws) \
+        if adr_present and self._approved(ws) \
                 and not state.get("dev_started") and not paused:
             self.gw.kanban_create(project, "切分编码任务并链接依赖：基于 design/ADR.md + design/TODO.md",
                                   "dev-lead", "--goal")
             state.update(dev_started=True, stage="development"); changed = True
+
+        # 2b) 自愈：ADR 已出但缺 canonical approved_versions.txt → 建补齐卡（不放宽闸门）。
+        #     真机 shi：arch-synthesizer 未写该文件 → 流水线卡死在 architecture，需人工补。
+        if adr_present and not self._approved(ws) and not state.get("dev_started") \
+                and not state.get("approval_repair_started") and not paused:
+            self.gw.kanban_create(
+                project,
+                "补齐架构批准文件：核对 ADR/TODO 与 critic 意见，blocking issues 已修则写 "
+                "design/approved_versions.txt（每行一个已批准版本号）",
+                "arch-synthesizer", "--goal")
+            state.update(approval_repair_started=True); changed = True
 
         # 3) 所有 dev 卡 done → 起 QA（限流暂停期不起）
         if state.get("dev_started") and self._all_dev_done(cards) \
@@ -143,6 +238,16 @@ class Orchestrator:
             self.gw.kanban_create(project, "全量 QA：基于 acceptance_core，并写 reports/qa/status.json",
                                   "qa", "--goal")
             state.update(qa_started=True, stage="qa"); changed = True
+
+        # 3b) 自愈：QA 卡已 done 但 reports/qa/status.json 缺失 → 建 QA 补齐卡（assignee=qa）。
+        #     真机 shi：QA 未写 status.json → 流水线卡在 QA→release，需人工补。
+        if state.get("qa_started") and self._qa_cards_done(cards) and not self._qa_status(ws) \
+                and not state.get("release_started") and not state.get("qa_repair_started") and not paused:
+            self.gw.kanban_create(
+                project,
+                "补齐 QA 结论：把测试结果写入 reports/qa/status.json（必含 release_allowed 字段）",
+                "qa", "--goal")
+            state.update(qa_repair_started=True); changed = True
 
         # 4) 本轮 QA 已起 + QA 放行 → 起 release。要求 qa_started，避免残留旧
         #    reports/qa/status.json（release_allowed=true）在本轮未跑 QA 时误触发 release。
@@ -165,9 +270,18 @@ class Orchestrator:
                 self.gw.kanban_create(project, "发布：QA 通过后合并/打包/部署", "release", "--goal")
                 state.update(release_started=True, stage="release"); changed = True
 
-        # 5) release 完成 → 项目完成
+        # 5) release 完成 → 项目完成。要求 release 卡 done **且** 产出 reports/release/manifest.json
+        #    （"done = 真的交付了"，而非仅看板卡 done）。manifest 缺失则建补齐卡（幂等）。
         if state.get("release_started") and self._release_done(cards) and state.get("stage") != "complete":
-            state.update(stage="complete"); changed = True
+            if self._release_manifest_ok(ws):
+                state.update(stage="complete", completion_mode="natural"); changed = True
+            elif not state.get("manifest_repair_started"):
+                self.gw.kanban_create(
+                    project,
+                    "补齐发布清单：写 reports/release/manifest.json（version/merged_branches/"
+                    "artifacts/run_command/notes）",
+                    "release", "--goal")
+                state.update(manifest_repair_started=True); changed = True
 
         if changed:
             self._save_state(ws, state)
@@ -200,15 +314,20 @@ def main(argv: Optional[list] = None) -> int:
     args = ap.parse_args(argv)
 
     settings = Settings()
-    orch = Orchestrator(HermesGateway(settings), data_root=settings.data_root)
-    if args.all:
-        for pid, stage in orch.tick_all().items():
-            print(f"{_now()} project {pid}: stage={stage}")
-    else:
-        d = Path(settings.data_root) / args.project
-        project = Project(project_id=args.project, port=0, key="",
-                          home=str(d / ".hermes"), workspace=str(d / "workspace"))
-        print(f"{_now()} project {args.project}: stage={orch.tick(project)}")
+    # 跨进程锁：与控制平面内嵌 loop / 上一轮慢 tick 互斥，拿不到就跳过本轮（幂等，无害）。
+    with tick_lock(settings.data_root) as got:
+        if not got:
+            print(f"{_now()} 另一个 orchestrator tick 正在运行，跳过本轮")
+            return 0
+        orch = Orchestrator(HermesGateway(settings), data_root=settings.data_root)
+        if args.all:
+            for pid, stage in orch.tick_all().items():
+                print(f"{_now()} project {pid}: stage={stage}")
+        else:
+            d = Path(settings.data_root) / args.project
+            project = Project(project_id=args.project, port=0, key="",
+                              home=str(d / ".hermes"), workspace=str(d / "workspace"))
+            print(f"{_now()} project {args.project}: stage={orch.tick(project)}")
     return 0
 
 

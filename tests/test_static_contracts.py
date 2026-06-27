@@ -331,6 +331,65 @@ def test_webui_guards_new_requirement_and_can_create_project():
     assert "function createProject" in html and "newproj" in html  # 可新建项目
 
 
+# --- 第七轮 P0：execute_code 全面封堵（两层 + 监测 + 验收）------------------------
+def test_launcher_disables_execute_code():
+    t = read("platform/launch_project.sh")
+    # CEO + no-code + executor 三处 disabled_toolsets 都要含 execute_code
+    assert t.count("execute_code") >= 3
+    assert '"code_execution","execute_code","terminal","file"' in t  # CEO
+
+
+def test_monitor_checks_execute_code_and_mount_isolation():
+    t = read("platform/monitor.sh")
+    assert "execute_code" in t
+    assert "check_docker_mount_isolation" in t and "AUTOCODE_PROJECT_ID" in t
+
+
+def test_launcher_injects_project_id_env():
+    t = read("platform/launch_project.sh")
+    assert "terminal.env.AUTOCODE_PROJECT_ID" in t
+
+
+# --- 第七轮 P0：YOLO 默认 0（不依赖 yolo 绕过 hook）------------------------------
+def test_launcher_yolo_defaults_off():
+    t = read("platform/launch_project.sh")
+    assert 'YOLO="${HERMES_YOLO_MODE:-0}"' in t
+    assert "HERMES_YOLO_MODE:-1" not in t   # 不再默认开 yolo
+
+
+# --- 第七轮 P1：orchestrator 跨进程锁 + 控制平面内嵌（systemd timer 失效兜底）------
+def test_orchestrator_has_tick_lock():
+    t = read("platform/orchestrator.py")
+    assert "def tick_lock" in t and ".orchestrator.lock" in t
+
+
+def test_control_plane_embedded_orchestrator():
+    t = read("platform/control_plane.py")
+    assert "AUTOCODE_EMBEDDED_ORCHESTRATOR" in t and "asyncio.to_thread" in t
+    assert "lifespan" in t   # 用 lifespan 而非已弃用的 on_event
+
+
+# --- 第七轮 P1：自愈 repair 卡 + 不放宽 approved 闸 + manifest 收紧 complete ------
+def test_orchestrator_self_heal_and_manifest():
+    t = read("platform/orchestrator.py")
+    assert "approval_repair_started" in t and "qa_repair_started" in t
+    assert "_release_manifest_ok" in t and "completion_mode" in t
+    assert 'approved_versions.txt' in t   # canonical，不放宽
+
+
+# --- 第七轮：confirm-plan 幂等 + /deliverable 端点 -------------------------------
+def test_confirm_plan_idempotent_and_deliverable():
+    t = read("platform/control_plane.py")
+    assert "already-started" in t and "product_started" in t
+    assert "def deliverable" in t and "is_done" in t
+
+
+# --- 第七轮：Web UI 确认需求按钮 ------------------------------------------------
+def test_webui_has_confirm_plan_button():
+    html = read("platform/webui.html")
+    assert "function confirmPlan" in html and "confirm-plan" in html
+
+
 def test_control_plane_bind_host_configurable_and_guarded():
     # 局域网访问：bind host 可配 + 非本机+默认 token 拒绝启动
     t = read("platform/control_plane.py")

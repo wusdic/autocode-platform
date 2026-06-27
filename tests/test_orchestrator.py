@@ -65,6 +65,34 @@ def test_prd_triggers_architecture_swarm(tmp_path):
     assert len(gw.swarms) == 1
 
 
+def test_noncanonical_prd_filename_tolerated_with_warning(tmp_path):
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    (ws / "design" / "prd-todo-cli.md").write_text("prd")   # agent 自由命名
+    assert _orch(data_root, gw).tick(project) == "architecture"
+    warns = (ws / ".autocode" / "warnings.jsonl").read_text()
+    assert "noncanonical_design_filename" in warns
+
+
+def test_adr_without_approved_creates_repair_card(tmp_path):
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    (ws / "design" / "PRD.md").write_text("p")
+    (ws / "design" / "ADR.md").write_text("a")   # ADR 出了但没 approved_versions.txt
+    _orch(data_root, gw).tick(project)
+    assert not any(a == "dev-lead" and "切分" in t for t, a, _ in gw.created)  # 没进开发
+    assert any(a == "arch-synthesizer" and "补齐架构批准文件" in t for t, a, _ in gw.created)
+
+
+def test_qa_done_without_status_creates_repair_card(tmp_path):
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)   # qa_started, 无 status.json
+    gw.cards = [{"id": "q1", "assignee": "qa", "status": "done"}]
+    _orch(data_root, gw).tick(project)
+    assert any(a == "qa" and "补齐 QA 结论" in t for t, a, _ in gw.created)
+
+
 def test_adr_and_approved_triggers_dev_plan(tmp_path):
     gw = FakeGateway()
     project, ws, data_root = _project(tmp_path)
@@ -124,9 +152,17 @@ def test_qa_pass_triggers_release_then_complete(tmp_path):
     stage = _orch(data_root, gw).tick(project)
     assert stage == "release"
     assert any(a == "release" for _, a, _ in gw.created)
-    # release 卡 done → complete
+    # release 卡 done 但缺 manifest → 不 complete，建补齐卡
     gw.cards = [{"id": "r1", "assignee": "release", "status": "done"}]
+    assert _orch(data_root, gw).tick(project) != "complete"
+    assert any("发布清单" in t for t, _, _ in gw.created)
+    # 补上 release manifest → complete（自然完成）
+    rel = ws / "reports" / "release"; rel.mkdir(parents=True)
+    (rel / "manifest.json").write_text('{"version": "0.1.0", "run_command": "python src/main.py"}')
     assert _orch(data_root, gw).tick(project) == "complete"
+    import json as _j
+    st = _j.loads((ws / ".autocode" / "state.json").read_text())
+    assert st.get("completion_mode") == "natural"
 
 
 def test_integrity_gate_blocks_release_when_no_artifacts(tmp_path):

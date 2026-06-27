@@ -154,10 +154,33 @@ async function renderChat(v){
   ta.placeholder = "对 CEO 说需求/追问…（Ctrl+Enter 发送；CEO 较慢，请耐心等）";
   const btn = document.createElement("button"); btn.id = "chatSend"; btn.textContent = "发送";
   row.appendChild(ta); row.appendChild(btn); v.appendChild(row);
+  // 与 CEO 对齐 core_need 后，点这里启动流水线（产品委员会→架构→dev→QA→release）。
+  // 这是 CEO 对话 → 自动开发的桥；缺了它用户只能手写 requirements.yaml（真机 shi 即如此）。
+  const confirmRow = document.createElement("div"); confirmRow.className = "row";
+  const cbtn = document.createElement("button"); cbtn.id = "confirmPlan";
+  cbtn.textContent = "✅ 确认需求并启动设计";
+  cbtn.style.cssText = "background:#15482f;border-color:#3ecf8e;color:#d8ffe9";
+  const cnote = document.createElement("span"); cnote.className = "mut";
+  cnote.textContent = "与 CEO 谈定 core_need 后点此，平台自动跑完整流水线";
+  confirmRow.appendChild(cbtn); confirmRow.appendChild(cnote); v.appendChild(confirmRow);
+  cbtn.onclick = confirmPlan;
   btn.onclick = sendMessage;
   ta.addEventListener("keydown", e => { if (e.ctrlKey && e.key === "Enter") sendMessage(); });
   await loadConversation();
   ta.focus();
+}
+async function confirmPlan(){
+  if (!confirm("确认需求并启动设计？\n\n这会让平台据当前对话/需求启动产品委员会 → 架构 → 开发 → QA → 发布的全自动流水线。请确保已与 CEO 谈定 core_need。")) return;
+  const cbtn = $("#confirmPlan"); if (cbtn) { cbtn.disabled = true; cbtn.textContent = "启动中…"; }
+  try {
+    const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/confirm-plan", "POST", {});
+    await loadConversation();
+    if (cbtn) cbtn.textContent = d.status === "already-started" ? "已启动（流水线运行中）" : "✅ 已启动设计";
+    state.tab = "state"; render();   // 切到状态页看推进
+  } catch (e) {
+    if (cbtn) { cbtn.disabled = false; cbtn.textContent = "✅ 确认需求并启动设计"; }
+    alert("启动失败：" + e.message);
+  }
 }
 async function loadConversation(){
   const log = $("#chatLog"); if (!log) return;

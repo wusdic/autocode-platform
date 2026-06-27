@@ -222,6 +222,19 @@ def test_qa_terminal_still_allowed(tmp_path):
     assert pp.enforce("terminal", {}, role="qa", ws=str(tmp_path)) is None
 
 
+def test_ceo_blocked_from_execute_code(tmp_path):
+    # 真机 shi：只挡 terminal/patch 时 CEO 仍能用 execute_code 越权写码 → 必须挡
+    assert pp.enforce("execute_code", {}, role="ceo", ws=str(tmp_path)) is not None
+
+
+def test_unknown_role_execute_code_fail_closed(tmp_path):
+    assert pp.enforce("execute_code", {}, role="weird", ws=str(tmp_path)) is not None
+
+
+def test_execute_code_in_code_and_sensitive_tools():
+    assert "execute_code" in pp.CODE_TOOLS and "execute_code" in pp.SENSITIVE_TOOLS
+
+
 def test_release_blocked_when_integrity_block_fails(tmp_path):
     # release_allowed=true 但 integrity 块未过（产物没落地）→ QA gate 仍拦
     qa = tmp_path / "reports" / "qa"

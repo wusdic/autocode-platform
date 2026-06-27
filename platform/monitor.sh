@@ -57,17 +57,37 @@ check_stuck() {     # ② 卡死/失败任务堆积
   fi
 }
 
-check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 code_execution
+check_first_layer() {   # ③ 第一层权限漂移：CEO 必须仍禁用 code_execution + execute_code
   local pid="$1" home="$2" cfg
   # 直接读 config.yaml——`hermes config show` 的格式化输出不含 disabled_toolsets 字段
   # （真机实测会 grep 空匹配而误报 CRIT）。config set 已把它写进 config.yaml。
   cfg="${home}/profiles/ceo/config.yaml"
   [ -f "${cfg}" ] || return 0
   local dis
-  dis=$(grep -A3 disabled_toolsets "${cfg}" 2>/dev/null || true)
-  if ! grep -q "code_execution" <<<"${dis}"; then
-    notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 code_execution——第一层权限被改动！"
-  fi
+  dis=$(grep -A4 disabled_toolsets "${cfg}" 2>/dev/null || true)
+  grep -q "code_execution" <<<"${dis}" \
+    || notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 code_execution——第一层权限被改动！"
+  grep -q "execute_code" <<<"${dis}" \
+    || notify CRIT "project ${pid}: CEO 的 disabled_toolsets 不含 execute_code——CEO 可越权写码！"
+}
+
+check_docker_mount_isolation() {  # ⑨ 跨项目挂载隔离（A3）：容器声明的项目 ≠ 实际挂载的 workspace → P0
+  command -v docker >/dev/null 2>&1 || return 0
+  local cid pid_env mounts proj
+  for cid in $(docker ps -q --filter 'name=hermes-' 2>/dev/null); do
+    # 容器内声明的项目（launcher 注入 AUTOCODE_PROJECT_ID）
+    pid_env=$(docker inspect "$cid" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+              | sed -n 's/^AUTOCODE_PROJECT_ID=//p' | head -1)
+    [ -n "$pid_env" ] || continue
+    # 实际挂载的项目 workspace（去重列出 /data/projects/<id>/workspace 里的 <id>）
+    mounts=$(docker inspect "$cid" --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null \
+             | sed -n 's#.*/data/projects/\([^/]*\)/workspace.*#\1#p' | sort -u)
+    for proj in $mounts; do
+      if [ "$proj" != "$pid_env" ]; then
+        notify CRIT "container ${cid}（声明项目 ${pid_env}）挂载了【其它项目 ${proj}】的 workspace——跨项目隔离被破坏（P0）！"
+      fi
+    done
+  done
 }
 
 check_logs() {      # ④ Hermes 崩溃迹象（文件日志 + journald，因 gateway 由 systemd 托管）
@@ -150,6 +170,7 @@ check_disk() {      # ⑤ 数据盘：<DISK_MIN_GB(默认10) WARN；<DISK_CRIT_G
 main() {
   [ -d "${PLATFORM_DATA_ROOT}" ] || { echo "no data root ${PLATFORM_DATA_ROOT}"; exit 0; }
   check_disk
+  check_docker_mount_isolation
   for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
     [ -d "${proj_dir}" ] || continue
     pid="$(basename "${proj_dir}")"

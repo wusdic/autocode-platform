@@ -139,7 +139,7 @@ echo "==> [4/6] 裁剪 toolset（第一层权限）+ 注入 SOUL/AGENTS"
 # CEO：只能沟通+看板。v0.16 配置值用 JSON 数组；toolsets 是"附加列表"不限制内置工具，
 # 真正的第一层权限是 agent.disabled_toolsets（必须含 code_execution，否则 CEO 能直接写码）。
 hermes -p ceo config set toolsets '["clarify","kanban","memory","messaging"]'
-hermes -p ceo config set agent.disabled_toolsets '["code_execution","terminal","file"]'
+hermes -p ceo config set agent.disabled_toolsets '["code_execution","execute_code","terminal","file"]'
 # 注入各角色 SOUL（模板存在才复制）
 inject_soul () {
   local role="$1"
@@ -165,12 +165,14 @@ for r in pm-research-a pm-research-b arch-simple arch-scale arch-security pm-syn
 done
 # 研发总监：看板+读文件，不写业务码
 hermes -p dev-lead config set toolsets '["kanban","file","memory"]'
-# 真正的第一层硬抑制：agent.disabled_toolsets（JSON 数组），移除 code_execution + terminal，
-# 保证 no-code 角色拿不到执行/改码工具（patch 由第二层 policy 插件兜底）。
+# 真正的第一层硬抑制：agent.disabled_toolsets（JSON 数组），移除 code_execution + execute_code
+# + terminal，保证 no-code 角色拿不到执行/改码工具（patch 由第二层 policy 插件兜底）。
+# 注意必须同时禁 execute_code——真机 shi 项目暴露：只禁 code_execution 时 CEO 仍能用 Hermes
+# 核心工具 execute_code 在 confirm-plan 前直接写出业务代码（P0 越权）。
 for r in pm-lead pm-critic arch-lead arch-critic change-guardian dev-lead \
          pm-research-a pm-research-b arch-simple arch-scale arch-security \
          pm-synthesizer arch-synthesizer; do
-  hermes -p "$r" config set agent.disabled_toolsets '["code_execution","terminal"]'
+  hermes -p "$r" config set agent.disabled_toolsets '["code_execution","execute_code","terminal"]'
 done
 # 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
 # 沙箱镜像：用部署时构建的非 root 镜像（映射宿主 UID，产物属主正确）。
@@ -207,6 +209,9 @@ PY
 }
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
+  # executor 在 Docker 沙箱里执行（terminal 是沙箱化的）；禁掉宿主级 code_execution/execute_code，
+  # 避免绕过 Docker 直接在宿主跑代码（隔离/安全模型依赖一切执行都在容器内）。
+  hermes -p "$r" config set agent.disabled_toolsets '["code_execution","execute_code"]'
   hermes -p "$r" config set terminal.backend docker
   hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
   # cwd 限定为本项目 workspace（gateway/cron 工作目录）；按卡指定 worktree 时由 Hermes 覆盖为该 worktree。
@@ -214,6 +219,10 @@ for r in dev-worker-1 dev-worker-2 qa release; do
   # 把 worktree 根与仓库路径透传进容器，让 worker/dev-lead 知道在哪开 worktree（容器内可见）。
   hermes -p "$r" config set terminal.env.WORKTREE_ROOT "${WORKTREE_ROOT}" 2>/dev/null || true
   hermes -p "$r" config set terminal.env.GIT_REPO "${WORKSPACE}" 2>/dev/null || true
+  # 注入项目标识（A3 跨项目挂载隔离）：monitor 据此核对"容器声明的项目"与"实际挂载的 workspace"
+  # 是否一致——Hermes 若跨项目复用同名容器（真机 shi 挂到 demo2 的 P0 漏洞），即可被抓出告警。
+  hermes -p "$r" config set terminal.env.AUTOCODE_PROJECT_ID "${PROJECT_ID}" 2>/dev/null || true
+  hermes -p "$r" config set terminal.env.AUTOCODE_WORKSPACE "${WORKSPACE}" 2>/dev/null || true
   # 只挂本项目 workspace —— 直接写 YAML 列表（见 Bug-1，不能用 config set）。
   set_docker_volumes "$r" "${WORKSPACE}:${WORKSPACE}"
 done
@@ -275,8 +284,10 @@ SERVICE="autocode-gw-${PROJECT_ID}"
 UNIT_DIR="${HOME}/.config/systemd/user"
 mkdir -p "${UNIT_DIR}"
 HERMES_BIN_DIR="$(dirname "$(command -v hermes)")"
-# gateway 无人值守、无人可审批 → 默认跳过审批（受 AUTOCODE_UNATTENDED 控制，见上方安全说明）。
-[ "${AUTOCODE_UNATTENDED}" = "1" ] && YOLO="${HERMES_YOLO_MODE:-1}" || YOLO="${HERMES_YOLO_MODE:-0}"
+# 无人值守靠 approvals.mode=off 跳过审批即可（见上方），**不依赖 YOLO**。
+# 安全策略不应默认开 HERMES_YOLO_MODE——yolo 有绕过 pre_tool_call hook（第二层设计闸门）的风险。
+# 故 YOLO 默认 0；hook 始终开（HERMES_ACCEPT_HOOKS=1）。确需 yolo 的操作者可显式 HERMES_YOLO_MODE=1。
+YOLO="${HERMES_YOLO_MODE:-0}"
 cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
 [Unit]
 Description=Autocode Hermes gateway for project ${PROJECT_ID}

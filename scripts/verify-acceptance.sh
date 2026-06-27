@@ -34,12 +34,29 @@ else
   echo "  需要先创建 ${PID1} 与 ${PID2} 两个项目（缺一）→ ${r_isolation}"
 fi
 
-echo "== 验收点 2：CEO 不干活（disabled_toolsets 含 code_execution）=="
+echo "== 验收点 2：CEO 不干活（disabled_toolsets 含 code_execution + execute_code）=="
 cfg="${p1}/.hermes/profiles/ceo/config.yaml"
-if [ -f "${cfg}" ] && grep -A3 disabled_toolsets "${cfg}" 2>/dev/null | grep -q code_execution; then
-  r_ceo="pass"
+if [ -f "${cfg}" ]; then
+  _dis=$(grep -A4 disabled_toolsets "${cfg}" 2>/dev/null || true)
+  grep -q code_execution <<<"${_dis}" && grep -q execute_code <<<"${_dis}" && r_ceo="pass"
 fi
-echo "  ${cfg} → ${r_ceo}"
+echo "  ${cfg} → ${r_ceo}（须同时含 code_execution 与 execute_code）"
+
+echo "== 验收点 2b：Docker 跨项目挂载隔离（容器声明项目 == 实际挂载 workspace）=="
+r_docker="manual"
+if command -v docker >/dev/null 2>&1; then
+  r_docker="pass"
+  for _cid in $(docker ps -q --filter 'name=hermes-' 2>/dev/null); do
+    _pe=$(docker inspect "${_cid}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^AUTOCODE_PROJECT_ID=//p' | head -1)
+    [ -n "${_pe}" ] || continue
+    for _m in $(docker inspect "${_cid}" --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null | sed -n 's#.*/data/projects/\([^/]*\)/workspace.*#\1#p' | sort -u); do
+      [ "${_m}" = "${_pe}" ] || { echo "  ❌ 容器 ${_cid} 声明 ${_pe} 却挂了 ${_m}"; r_docker="fail"; }
+    done
+  done
+  echo "  → ${r_docker}"
+else
+  echo "  docker 不可用，标 manual"
+fi
 
 echo "== 验收点 4：并行不冲突（worktree + allowed_paths + 提交落地）=="
 ws1="${p1}/workspace"
@@ -77,6 +94,7 @@ cat <<JSON
 ==== 验收汇总（机器可读）====
 {
   "isolation": "${r_isolation}",
+  "docker_mount_isolation": "${r_docker}",
   "ceo_no_code": "${r_ceo}",
   "auto_progress": "${r_auto}",
   "parallel_no_conflict": "${r_parallel}",
@@ -86,6 +104,9 @@ cat <<JSON
 JSON
 
 # 任一确定性检查 fail → 退出码非 0，便于 CI/运维门禁串联。
+case "${r_isolation}${r_ceo}${r_parallel}${r_gate}${r_docker}" in
+  passpasspasspassmanual|passpasspasspasspass) exit 0 ;;
+esac
 case "${r_isolation}${r_ceo}${r_parallel}${r_gate}" in
   passpasspasspass) exit 0 ;;
   *) exit 1 ;;

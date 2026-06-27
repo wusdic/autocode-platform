@@ -43,8 +43,9 @@ NO_CODE_ROLES = {
     "arch-simple", "arch-scale", "arch-security", "arch-synthesizer",
 }
 
-# 直接执行/改码的工具：no-code 角色一律禁止
-CODE_TOOLS = {"terminal", "patch"}
+# 直接执行/改码的工具：no-code 角色一律禁止。含 execute_code——Hermes 的核心代码执行工具，
+# 真机 shi 暴露：只挡 terminal/patch 时 CEO 仍能用 execute_code 在 confirm-plan 前直接写业务代码。
+CODE_TOOLS = {"terminal", "patch", "execute_code"}
 # 写文件工具：no-code 角色仅允许写 design/；dev-worker 需过设计闸门
 WRITE_TOOLS = {"patch", "write_file"}
 
@@ -53,8 +54,8 @@ EXECUTOR_ROLES = {"qa", "release"}
 # QA 只能写测试/报告，release 只能写产物——不得改业务代码（设计 §3.2 职责边界）。
 QA_WRITE_PREFIXES = ["tests", "test", "reports/qa", "coverage"]
 RELEASE_WRITE_PREFIXES = ["dist", "release", "reports/release"]
-# 敏感工具：角色识别不出时，对这些一律 fail-closed 拒绝
-SENSITIVE_TOOLS = {"terminal", "patch", "write_file"}
+# 敏感工具：角色识别不出时，对这些一律 fail-closed 拒绝（含 execute_code，见 CODE_TOOLS 说明）
+SENSITIVE_TOOLS = {"terminal", "patch", "write_file", "execute_code"}
 
 DESIGN_DIR = "design"
 
