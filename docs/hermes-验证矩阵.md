@@ -43,7 +43,7 @@
 | `config set` 写入 `profiles/<name>/config.yaml` | ✅ | 真机日志逐行确认（`✓ Set ... in .../config.yaml`） |
 | ⚠️ `config show` **不渲染** `disabled_toolsets` 等字段 | ✅ | **真机实测**：校验权限要直接读 `config.yaml`，不能靠 `config show \| grep` |
 | `approvals.mode`（manual 默认 / off 无人值守） | ✅ | **真机实测**：默认 manual 会反复弹审批中断自动化；隔离架构下设 off 安全（见 §G） |
-| `toolsets`（**附加列表，非白名单**）| ✅ | **真机实测修正**：内置 `code_execution/terminal/file` 始终可用，必须用 `agent.disabled_toolsets` 显式禁用；值用 JSON 数组（NEW-K/L）|
+| `toolsets`（**附加列表，非白名单**）| ✅ | **真机实测修正**：内置 `code_execution/execute_code/terminal/file` 始终可用，必须用 `agent.disabled_toolsets` 显式禁用；值用 JSON 数组（NEW-K/L）。**必含 `execute_code`**——真机 shi：只禁 `code_execution` 时 CEO 仍能用 `execute_code` 越权写码 |
 
 ## D. Hooks / 插件
 | 用法 | 状态 | 来源 / 备注 |
@@ -67,7 +67,8 @@
 | `gateway install` 的单元是**单个机器级 `hermes-gateway.service`** | ✅ | cli-commands.md；故我们改用每项目唯一命名 user 单元，隔离性待真机确认 |
 
 ## F. 已知设计限制
-- **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进（部署装 `autocode-orchestrator.timer` 每分钟 tick；状态存 `workspace/.autocode/state.json`）。起 release 需本轮 `qa_started`，挡残留旧 `status.json` 误触发（评审 E）；手动 `architecture-swarm` 端点与状态机共享 `arch_started` 标记，幂等不双触发（评审 D）。watchdog 退回只管异常续跑，且限流暂停期内不起新续跑卡（评审 C）。完整**事件驱动**（监听卡 done 事件而非轮询）仍属后续（需 Redis 事件总线）。
+- **全流程编排**：✅ 已用 `orchestrator.py` 状态机闭合——产品→架构→dev→QA→release 按 文件信号 + Kanban 状态幂等推进。**双跑保障可靠**：除 `autocode-orchestrator.timer` 外，orchestrator 还**内嵌进控制平面常驻进程**（lifespan，部署 `AUTOCODE_EMBEDDED_ORCHESTRATOR=1`），跨进程 `tick_lock`（`.orchestrator.lock`）与 timer 互斥、绝不双跑——修真机 shi"systemd timer 重启后失效、流水线全靠人工 tick"。起 release 需本轮 `qa_started`；手动 `architecture-swarm` 端点共享 `arch_started` 幂等。**自愈不放宽闸门**：ADR 出但缺 canonical `approved_versions.txt` → 建补齐卡；QA 卡 done 但缺 `status.json` → 建 QA 补齐卡；PRD/ADR 容忍非 canonical 文件名但落 `.autocode/warnings.jsonl`。**complete 收口**：要求 `reports/release/manifest.json` 存在（缺则建补齐卡），并记 `completion_mode=natural`。完整事件驱动仍属后续（Redis）。
+- **跨项目 Docker 挂载隔离**：✅ executor 注入 `terminal.env.AUTOCODE_PROJECT_ID/WORKSPACE`；monitor `check_docker_mount_isolation` 核对"容器声明项目 == 实际挂载 workspace"，不一致即 CRIT（修真机 shi：Hermes 跨项目复用容器，shi 的 worker 挂到 demo2 的 P0 漏洞）。验收脚本同检。
 - **dev-worker 并行真隔离（worktree）**：✅ 三重保障——① 沙箱镜像装 git（`docker/python-sandbox.Dockerfile`，否则容器内 `git worktree/commit/merge` 物理不可用）；② workspace git 提交身份持久化到 repo config + 镜像内 `git config` 兜底身份 + `safe.directory '*'`（否则容器内 commit 报"who are you"/dubious ownership 失败）；③ SOUL.dev-lead 强约束"每张编码卡必须 `--workspace worktree:${WORKTREE_ROOT}/<短名>` + allowed_paths"，dev-worker 完工 `git commit`，`terminal.env` 透传 WORKTREE_ROOT/GIT_REPO。monitor `check_dev_commits` 兜底观测"卡 done 但无提交"。
 - **交付完整性闸门**：✅ `qa_integrity.py` + orchestrator 起 release 前独立硬闸 `min_release_ok`（dev 卡 done 却只有 init 提交/无源码落地 → 拦，建复验卡，不信任 agent 汇报）+ policy QA gate 校验 `status.json.integrity`（git 脏/缺文件/留 TODO 占位 → 拦）。挡"看板 done 但代码没落地"（DEV-4 安全码丢失类）。
 - **无人值守模式**：✅ 部署按 `AUTOCODE_MODE`（production/unattended/demo）写 `.platform_runtime.env`，timers 读取；unattended 默认 `AUTOCODE_AUTO_APPROVE_REVIEW=1`，安全靠 QA gate + 设计闸门 + 完整性闸门三重兜底而非人工。
@@ -81,10 +82,11 @@
 - **SSE `/events` 为一次性快照**：持续推送属阶段 13（Redis 事件总线）。
 
 ## G. 审批与无人值守安全模型
-平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台用**一个显式开关 `AUTOCODE_UNATTENDED`**（默认 1）统一控制：为 1 时本项目 `approvals.mode=off` + gateway 单元 `HERMES_YOLO_MODE=1`；为 0 时保留人工审批。审批配置只写**本项目 HERMES_HOME**，不动用户主配置。
+平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台用**一个显式开关 `AUTOCODE_UNATTENDED`**（默认 1）统一控制：为 1 时本项目 `approvals.mode=off`；为 0 时保留人工审批。审批配置只写**本项目 HERMES_HOME**，不动用户主配置。
+> **不依赖 YOLO**：`HERMES_YOLO_MODE` 默认 **0**（不再随无人值守开 1）——yolo 有绕过 pre_tool_call hook（第二层设计闸门）的风险，安全策略不应依赖它。无人值守靠 `approvals.mode=off` 跳过审批即可，`HERMES_ACCEPT_HOOKS=1` 始终开。确需 yolo 的操作者可显式 `HERMES_YOLO_MODE=1`。
 
 **为何不降低实际安全**（真机报告分析，Hermes 三层安全模型）：
 - **第 1 层 HARDLINE（12 条，不可绕过）**：`rm -rf /`、`mkfs`、`dd` 写裸设备、fork bomb、`shutdown` 等 + sudo-stdin guard——**off/yolo 也拦得住**。
 - 第 2 层 DANGEROUS（61 条）、第 3 层 Tirith（~80 条）：off 跳过。
-- 但**触发面已被架构消除**：CEO 无终端（`disabled_toolsets` 含 code_execution/terminal）；dev-worker 在 Docker（源码级豁免 approval.py，approval 本就不作用于容器内）；gateway 只跑 `hermes kanban`。
+- 但**触发面已被架构消除**：CEO 无终端/无代码工具（`disabled_toolsets` 含 code_execution/**execute_code**/terminal/file）；dev-worker 在 Docker（源码级豁免 approval.py，approval 本就不作用于容器内）；gateway 只跑 `hermes kanban`。
 > 结论：安全靠**架构隔离 + 设计闸门 + 监测告警**实现，不靠人工审批拦截。生产若需更严，把 `HERMES_APPROVALS_MODE=smart` 并确保 worker 全在 Docker。
