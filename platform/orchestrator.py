@@ -84,6 +84,10 @@ def tick_lock(data_root: str):
 
 
 def provider_paused(data_root: str) -> bool:
+    # 临时过载（.provider_pause，含 until-epoch）或余额耗尽（.provider_billing_dead，永久直至充值）
+    # 都不起新 swarm/卡。余额耗尽是 monitor 检测 1113 写的，续跑/重试无意义（D13/D19）。
+    if (Path(data_root) / ".provider_billing_dead").exists():
+        return True
     f = Path(data_root) / ".provider_pause"
     if not f.exists():
         return False
@@ -195,6 +199,17 @@ class Orchestrator:
         return bool(dev) and all(_done(c) for c in dev)
 
     @staticmethod
+    def _dev_complete(cards: list, ws: Path) -> bool:
+        """dev 是否完成。正常路径：dev-worker fan-out 卡全 done。direct-to-QA 路径（D30，
+        真机 demo1：dev-lead 串行直接交付、无 fan-out 卡）：无 dev-worker 卡但 dev-lead 卡已 done
+        且**已有真实源码落地**——避免状态机在 dev→qa 死锁，又靠产物校验防"空手放行"。"""
+        dev = [c for c in cards if str(c.get("assignee", "")).startswith("dev-worker")]
+        if dev:
+            return all(_done(c) for c in dev)
+        lead_done = any(_done(c) and str(c.get("assignee", "")) == "dev-lead" for c in cards)
+        return lead_done and qa_integrity.expected_files_present(ws)
+
+    @staticmethod
     def _release_done(cards: list) -> bool:
         rel = [c for c in cards if str(c.get("assignee", "")) == "release"]
         return bool(rel) and all(_done(c) for c in rel)
@@ -232,8 +247,8 @@ class Orchestrator:
                 "arch-synthesizer", "--goal")
             state.update(approval_repair_started=True); changed = True
 
-        # 3) 所有 dev 卡 done → 起 QA（限流暂停期不起）
-        if state.get("dev_started") and self._all_dev_done(cards) \
+        # 3) dev 完成（fan-out 卡全 done，或 direct-to-QA 路径）→ 起 QA（限流暂停期不起）
+        if state.get("dev_started") and self._dev_complete(cards, ws) \
                 and not state.get("qa_started") and not paused:
             self.gw.kanban_create(project, "全量 QA：基于 acceptance_core，并写 reports/qa/status.json",
                                   "qa", "--goal")
@@ -257,7 +272,7 @@ class Orchestrator:
             # 独立交付完整性硬闸（不信任 agent 汇报）：dev 卡 done 却无任何提交/源码落地，
             # 或 status.json 的 integrity 块未通过 → 不起 release，建一张人工 review 卡（幂等）。
             ok, reason = qa_integrity.min_release_ok(
-                ws, self._all_dev_done(cards), qa_status)
+                ws, self._dev_complete(cards, ws), qa_status)
             if not ok:
                 if not state.get("integrity_blocked"):
                     self.gw.kanban_create(

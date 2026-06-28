@@ -49,11 +49,13 @@ check_gateway() {   # ① gateway 存活（可选自恢复，默认只告警）
 
 check_stuck() {     # ② 卡死/失败任务堆积
   local pid="$1" home="$2" n
+  # D14：按可靠的 status 字段统计（last_event 在 list JSON 可能为空，单靠它会漏报为 0）。
   n=$(HERMES_HOME="${home}" hermes kanban --board "${pid}" list --json 2>/dev/null \
-      | jq '[.[] | select(.last_event=="gave_up" or .last_event=="timed_out"
+      | jq '[.[] | select(.status=="blocked" or .status=="failed"
+                          or .last_event=="gave_up" or .last_event=="timed_out"
                           or .last_event=="stale" or .last_event=="protocol_violation")] | length' 2>/dev/null)
   if [ "${n:-0}" -gt 0 ]; then
-    notify WARN "project ${pid}: ${n} 个卡死/失败任务（watchdog 应已续跑；若持续堆积需人工介入）"
+    notify WARN "project ${pid}: ${n} 个卡死/失败/blocked 任务（watchdog 应已续跑/分类处理；持续堆积需人工介入）"
   fi
 }
 
@@ -102,8 +104,12 @@ check_logs() {      # ④ Hermes 崩溃迹象（文件日志 + journald，因 ga
   jlog=$(journalctl --user -u "autocode-gw-${pid}.service" --since "${JOURNAL_SINCE:-10 min ago}" --no-pager 2>/dev/null || echo "")
   grep -Eq "Traceback|CRITICAL|panic" <<<"${jlog}" \
     && notify WARN "project ${pid}: gateway journal 近期出现 Traceback/CRITICAL"
-  grep -Eq "1113|Insufficient balance|no resource package" <<<"${jlog}" \
-    && notify CRIT "project ${pid}: 模型供应商余额耗尽，相关角色将无法工作（需充值）"
+  if grep -Eq "1113|Insufficient balance|no resource package" <<<"${jlog}"; then
+    notify CRIT "project ${pid}: 模型供应商余额耗尽(1113)，相关角色将永久失败（需充值，重试无意义）"
+    # 余额耗尽是永久性故障：写 billing-dead 标记，orchestrator/watchdog 据此不再起新任务/续跑
+    # （区别于 1305 临时过载写 .provider_pause）。充值后人工 `rm .provider_billing_dead` 恢复。
+    echo "$(date -Is) insufficient balance (1113)" > "${PLATFORM_DATA_ROOT}/.provider_billing_dead" 2>/dev/null || true
+  fi
   if grep -Eq "1305|temporarily overloaded" <<<"${jlog}"; then
     # 去重：同一条限流日志只触发一次暂停。取窗口内最新一行 1305 的指纹（行内容哈希），
     # 与上次已处理的指纹比对；相同则不重写（避免“清了又写”把暂停无限续命）。

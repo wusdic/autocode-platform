@@ -29,7 +29,7 @@ platform/
   qa_integrity.py       交付完整性校验（防"看板 done 但代码没落地"：提交/产物/占位/范围扫描）
   scope_guard.py        提交级范围审计（git diff 必须落在 allowed_paths 内，堵 terminal 绕过）
   webui.html            单文件 Web UI（控制平面 GET / 提供，转义渲染 + CSP，防存储型 XSS）
-  launch_project.sh     项目启动器：建实例 + board + 17 个角色 profile + gateway（建前跑模型预检）
+  launch_project.sh     项目启动器：建实例 + board + 17 角色 + gateway（模型预检 + worker 后端探测/校验，gateway 单元 SupplementaryGroups=docker）
   check-models.sh       模型可用性预检：每个 provider+model 发最小请求，早发现 key/模型名错
   orchestrator.py       状态机：产品→架构→dev→QA→release 幂等编排（systemd timer + 控制平面内嵌双跑，跨进程锁互斥）
   watchdog.sh           异常续跑 + 熔断 + review 放行 + 限流暂停跳过（不做正常编排，归 orchestrator）

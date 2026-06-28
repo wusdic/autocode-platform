@@ -207,24 +207,59 @@ t["docker_volumes"] = [vol]
 p.write_text(yaml.safe_dump(d, default_flow_style=False, allow_unicode=True, sort_keys=False))
 PY
 }
+# local backend：把 terminal.backend 写 local 并删掉 docker_image/docker_volumes 残留（真正 YAML，避免污染）。
+set_terminal_local() {  # profile
+  local cfg="${HERMES_HOME}/profiles/$1/config.yaml"
+  "$_PYBIN" - "$cfg" <<'PY'
+import sys, yaml, pathlib
+p = pathlib.Path(sys.argv[1]); d = yaml.safe_load(p.read_text()) if p.exists() else {}
+if not isinstance(d, dict): d = {}
+t = d.get("terminal");  t = t if isinstance(t, dict) else {}; d["terminal"] = t
+t["backend"] = "local"; t.pop("docker_image", None); t.pop("docker_volumes", None)
+p.write_text(yaml.safe_dump(d, default_flow_style=False, allow_unicode=True, sort_keys=False))
+PY
+}
+# D26：executor 后端选择。Docker 是生产默认（隔离安全模型依赖它）；但真机暴露 systemd user service
+# 子进程（worker）常因 docker 组未透传而 daemon 不可用 → worker 全卡死。根治见下方 SupplementaryGroups；
+# 这里再加一层：建项目时探测运行上下文能否用 docker，不行则【拒绝】建项目（除非显式允许降级 local）。
+AUTOCODE_EXECUTOR_BACKEND="${AUTOCODE_EXECUTOR_BACKEND:-auto}"   # auto|docker|local
+AUTOCODE_ALLOW_LOCAL_EXECUTOR="${AUTOCODE_ALLOW_LOCAL_EXECUTOR:-0}"
+_docker_runnable() { command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; }
+case "${AUTOCODE_EXECUTOR_BACKEND}" in
+  docker) _docker_runnable || { echo "❌ 要求 docker 后端但当前上下文 docker 不可用（重登/重启 user@uid 让 docker 组生效）。" >&2; exit 1; }; EXECUTOR_BACKEND=docker ;;
+  local)  [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ] || { echo "❌ local 后端削弱隔离（在宿主跑代码）。确需降级请设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1。" >&2; exit 1; }; EXECUTOR_BACKEND=local ;;
+  auto)   if _docker_runnable; then EXECUTOR_BACKEND=docker;
+          elif [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ]; then EXECUTOR_BACKEND=local;
+               echo "⚠️ docker 当前上下文不可用，按显式允许降级 local（爆炸半径=宿主，仅开发调试）。" >&2;
+          else echo "❌ docker 当前上下文不可用且未允许 local 降级，拒绝建项目。修复：重登或 'sudo systemctl restart user@\$(id -u)' 让 docker 组生效；或设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1 降级。" >&2; exit 1; fi ;;
+  *) echo "❌ 无效 AUTOCODE_EXECUTOR_BACKEND=${AUTOCODE_EXECUTOR_BACKEND}" >&2; exit 1 ;;
+esac
+# 运行时标记，供 /state、/deliverable、验收展示。
+mkdir -p "${WORKSPACE}/.autocode"
+"$_PYBIN" - "${WORKSPACE}/.autocode/executor_backend.json" "${EXECUTOR_BACKEND}" <<'PY'
+import sys, json, pathlib
+p, be = pathlib.Path(sys.argv[1]), sys.argv[2]
+p.write_text(json.dumps({"backend": be, "degraded": be != "docker"}, ensure_ascii=False, indent=2))
+PY
+echo "==> executor 后端：${EXECUTOR_BACKEND}$([ "${EXECUTOR_BACKEND}" = local ] && echo '（degraded，隔离减弱）')"
+
 for r in dev-worker-1 dev-worker-2 qa release; do
   hermes -p "$r" config set toolsets '["kanban","terminal","file","memory"]'
-  # executor 在 Docker 沙箱里执行（terminal 是沙箱化的）；禁掉宿主级 code_execution/execute_code，
-  # 避免绕过 Docker 直接在宿主跑代码（隔离/安全模型依赖一切执行都在容器内）。
+  # executor 禁宿主级 code_execution/execute_code（执行只在沙箱内，不绕过 Docker 在宿主跑代码）。
   hermes -p "$r" config set agent.disabled_toolsets '["code_execution","execute_code"]'
-  hermes -p "$r" config set terminal.backend docker
-  hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
-  # cwd 限定为本项目 workspace（gateway/cron 工作目录）；按卡指定 worktree 时由 Hermes 覆盖为该 worktree。
   hermes -p "$r" config set terminal.cwd "${WORKSPACE}"
-  # 把 worktree 根与仓库路径透传进容器，让 worker/dev-lead 知道在哪开 worktree（容器内可见）。
   hermes -p "$r" config set terminal.env.WORKTREE_ROOT "${WORKTREE_ROOT}" 2>/dev/null || true
   hermes -p "$r" config set terminal.env.GIT_REPO "${WORKSPACE}" 2>/dev/null || true
-  # 注入项目标识（A3 跨项目挂载隔离）：monitor 据此核对"容器声明的项目"与"实际挂载的 workspace"
-  # 是否一致——Hermes 若跨项目复用同名容器（真机 shi 挂到 demo2 的 P0 漏洞），即可被抓出告警。
+  # 注入项目标识（跨项目挂载隔离）：monitor 据此核对"容器声明项目"与"实际挂载 workspace"是否一致。
   hermes -p "$r" config set terminal.env.AUTOCODE_PROJECT_ID "${PROJECT_ID}" 2>/dev/null || true
   hermes -p "$r" config set terminal.env.AUTOCODE_WORKSPACE "${WORKSPACE}" 2>/dev/null || true
-  # 只挂本项目 workspace —— 直接写 YAML 列表（见 Bug-1，不能用 config set）。
-  set_docker_volumes "$r" "${WORKSPACE}:${WORKSPACE}"
+  if [ "${EXECUTOR_BACKEND}" = "docker" ]; then
+    hermes -p "$r" config set terminal.backend docker
+    hermes -p "$r" config set terminal.docker_image "${SANDBOX_IMAGE}"
+    set_docker_volumes "$r" "${WORKSPACE}:${WORKSPACE}"   # YAML 列表（Bug-1，不能用 config set）
+  else
+    set_terminal_local "$r"
+  fi
 done
 # 复制 base skills 快照到各 profile（只读模板）
 for d in "${HERMES_HOME}"/profiles/*/; do
@@ -288,6 +323,12 @@ HERMES_BIN_DIR="$(dirname "$(command -v hermes)")"
 # 安全策略不应默认开 HERMES_YOLO_MODE——yolo 有绕过 pre_tool_call hook（第二层设计闸门）的风险。
 # 故 YOLO 默认 0；hook 始终开（HERMES_ACCEPT_HOOKS=1）。确需 yolo 的操作者可显式 HERMES_YOLO_MODE=1。
 YOLO="${HERMES_YOLO_MODE:-0}"
+# D26 根治：gateway 派生 worker 子进程跑 docker，必须让 worker 继承 docker 组。systemd user
+# service 默认不带用户的补充组（即便用户在 docker 组），导致 worker 调 docker daemon 失败、全卡死。
+# SupplementaryGroups=docker 让该服务进程（及其 worker 子进程）拿到 docker 组——根本不必降级 local。
+# 仅当宿主存在 docker 组时才写（local 后端或无 docker 的机器不写，避免 unit 启动报"未知组"）。
+DOCKER_GROUP_LINE=""
+getent group docker >/dev/null 2>&1 && DOCKER_GROUP_LINE="SupplementaryGroups=docker"
 cat > "${UNIT_DIR}/${SERVICE}.service" <<EOF
 [Unit]
 Description=Autocode Hermes gateway for project ${PROJECT_ID}
@@ -300,6 +341,7 @@ Environment=HERMES_ACCEPT_HOOKS=1
 Environment=HERMES_YOLO_MODE=${YOLO}
 Environment=XDG_RUNTIME_DIR=%t
 Environment=PATH=${HERMES_BIN_DIR}:/usr/local/bin:/usr/bin:/bin
+${DOCKER_GROUP_LINE}
 EnvironmentFile=-${HOME}/.hermes/.env
 WorkingDirectory=${WORKSPACE}
 ExecStart=$(command -v hermes) -p ceo gateway run
@@ -309,6 +351,30 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 EOF
+# D29：启动 gateway 前校验 worker profile（toolsets 含 terminal/file、disabled 含 execute_code、
+# backend 一致）。把"worker 缺工具/后端不对"从"跑到 dev 阶段才卡死"提前到"建项目时就失败"。
+_verify_worker_profiles() {
+  local r cfg ok=1
+  for r in dev-worker-1 dev-worker-2 qa release; do
+    cfg="${HERMES_HOME}/profiles/$r/config.yaml"
+    "$_PYBIN" - "$cfg" "$r" "${EXECUTOR_BACKEND}" <<'PY' || ok=0
+import sys, yaml, pathlib
+cfg, role, be = sys.argv[1], sys.argv[2], sys.argv[3]
+d = yaml.safe_load(pathlib.Path(cfg).read_text()) if pathlib.Path(cfg).exists() else {}
+def fail(m): print(f"  ❌ {role}: {m}"); sys.exit(1)
+ts = (d.get("toolsets") or [])
+if not isinstance(ts, list): fail("toolsets 不是 YAML 列表（被写成字符串？）")
+for need in ("terminal", "file", "kanban"):
+    if need not in ts: fail(f"toolsets 缺 {need}（Hermes #22924 回归，worker 无法跑 shell/写文件）")
+dis = ((d.get("agent") or {}).get("disabled_toolsets") or [])
+if not isinstance(dis, list) or "execute_code" not in dis: fail("disabled_toolsets 缺 execute_code 或非列表")
+tb = (d.get("terminal") or {}).get("backend")
+if tb != be: fail(f"terminal.backend={tb!r} 与选定 {be!r} 不一致")
+PY
+  done
+  [ "$ok" = 1 ]
+}
+_verify_worker_profiles || { echo "❌ worker profile 校验失败，拒绝启动 gateway。" >&2; exit 1; }
 # 让 user service 在用户未登录时也能运行（开机自启）。
 loginctl enable-linger "$USER" 2>/dev/null || true
 # user systemd 需要 XDG_RUNTIME_DIR，否则 daemon-reload 报 "No medium found"（NEW-J）。

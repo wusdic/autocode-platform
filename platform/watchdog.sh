@@ -30,6 +30,13 @@ clear_expired_pause() {
 }
 clear_expired_pause
 
+# 余额耗尽（1113）是永久性故障，续跑/重试无意义（D13/D19）。monitor 检测到会写此标记；
+# 充值后人工 rm 即恢复。billing dead 时不起新续跑卡（避免无效重试刷爆看板与额度）。
+if [ -f "${PLATFORM_DATA_ROOT}/.provider_billing_dead" ]; then
+  echo "$(date -Is) [warn] watchdog: 供应商余额耗尽（永久），跳过本轮续跑——需充值后 rm .provider_billing_dead"
+  exit 0
+fi
+
 if provider_paused; then
   echo "$(date -Is) [info] watchdog: 供应商限流暂停期内，跳过本轮续跑（.provider_pause 生效）"
   exit 0
@@ -45,15 +52,29 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
   # 全量看板快照（一次拉取，供去重与读取原任务上下文）
   all_json=$(hermes kanban --board "$pid" list --json 2>/dev/null || echo '[]')
 
-  # 覆盖设计 §7 列出的全部异常事件：gave_up / timed_out / stale / protocol_violation。
-  # 连同原任务的 assignee 与 workspace 一并取出（tab 分隔），供续跑卡继承上下文。
+  # D14 真机实测：tasks 的 last_event 字段在 list JSON 里**为空**（事件只进 task_events 表），
+  # 只按 last_event 筛 → 匹配 0 条、续跑机制彻底失效。改为按可靠的 **status** 字段捞异常任务，
+  # 并连同各 reason 字段一起取出做分类（环境/挂载、余额不足等"重试无意义"的不续跑）。
   echo "$all_json" \
-   | jq -r '.[] | select(.last_event=="gave_up" or .last_event=="timed_out"
+   | jq -r '.[] | select(.status=="blocked" or .status=="failed" or .status=="gave_up"
+                         or .status=="stale" or .status=="timed_out" or .status=="protocol_violation"
+                         or .last_event=="gave_up" or .last_event=="timed_out"
                          or .last_event=="stale" or .last_event=="protocol_violation")
-            | "\(.id)\t\(.assignee // "dev-worker-1")\t\(.workspace // "")"' \
-   | while IFS=$'\t' read -r tid assignee workspace; do
+            | "\(.id)\t\(.assignee // "dev-worker-1")\t\(.workspace // "")\t\([.block_reason,.reason,.blocked_reason,.error,.message]|map(.//"")|join(" ")|ascii_downcase)"' \
+   | while IFS=$'\t' read -r tid assignee workspace reason; do
        [ -z "$tid" ] && continue
        [ -z "$assignee" ] && assignee="dev-worker-1"
+       # 分类：重试无意义的故障不续跑（避免 D18"反复 unblock 余额不足任务"的无效循环）。
+       case "$reason" in
+         *insufficient\ balance*|*1113*|*billing*|*no\ resource\ package*|*余额*)
+           continue ;;  # 供应商余额耗尽：靠 monitor 的 .provider_billing_dead + 充值，续跑无意义
+         *environment*|*mount*|*wrong\ workspace*|*foreign\ workspace*)
+           # 环境/挂载错误：续跑必再失败 → 建一张排查卡（幂等）交人工/触发 docker guard，不盲目续跑
+           hermes kanban --board "$pid" create "环境/挂载异常需排查：${tid}" \
+             --assignee change-guardian --idempotency-key "wd-env-${tid}" \
+             --body "任务 ${tid} 因环境/挂载异常 blocked（${reason}）。续跑无用，请排查 Docker 后端/跨项目挂载。" 2>/dev/null || true
+           continue ;;
+       esac
        title="Continue task ${tid}"
        # 去重：用官方 --idempotency-key 保证同一卡死任务只生成一张续跑卡
        # （比按标题匹配更可靠）；title 去重作为二次保险保留。

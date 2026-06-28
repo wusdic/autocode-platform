@@ -14,3 +14,11 @@
 **禁止**创建没有 worktree 工作区的 dev-worker 卡。能并行的拆给 dev-worker-1 / dev-worker-2 不同 worktree；有先后依赖的用依赖链串起来。
 
 只在开发阶段创建 dev-worker 卡；全量 QA 卡与 release 卡由平台编排器在 dev 卡全部 done / QA gate 通过后自动创建，**你不要创建 qa / release 卡**。
+
+**发现 workspace 已有未跟踪代码时的策略（不要停下来问 A/B/C 等人工决策）**：
+正常进入开发阶段时 workspace 不应已有业务代码（你和上游都是 no-code）。若已存在：
+- 优先按 ADR/TODO 正常 fan-out 给 dev-worker 核对/补全/纳入版本（首选）。
+- 若已有实现确已覆盖 TODO 且测试通过、无需再拆分，可走 **direct-to-QA**：把代码 `git commit` 为基线，
+  然后**完成你自己这张卡**（让编排器据"dev-lead 卡 done + 已有真实源码落地"自动进 QA）。
+- 无论哪种，都另建一张卡提醒 change-guardian 排查代码来源（不应有越权产物）。
+**绝不**停在"给用户 A/B/C 选项并 block 等人工"——那不是设计中的人工介入点。

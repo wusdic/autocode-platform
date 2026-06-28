@@ -95,6 +95,7 @@ Environment=XDG_RUNTIME_DIR=%t
 Environment=PATH=${HERMES_BIN_DIR}:${PLATFORM_HOME}/venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PLATFORM_BIND_HOST=${BIND_HOST}
 Environment=AUTOCODE_EMBEDDED_ORCHESTRATOR=${AUTOCODE_EMBEDDED_ORCHESTRATOR:-1}
+$(getent group docker >/dev/null 2>&1 && echo 'SupplementaryGroups=docker')
 ExecStart=${PLATFORM_HOME}/venv/bin/uvicorn control_plane:app --app-dir ${PLATFORM_HOME} --host ${BIND_HOST} --port 9000
 Restart=always
 RestartSec=3

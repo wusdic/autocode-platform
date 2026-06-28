@@ -390,6 +390,37 @@ def test_webui_has_confirm_plan_button():
     assert "function confirmPlan" in html and "confirm-plan" in html
 
 
+# --- 第八轮 P0：watchdog/monitor 按 status 检测异常（last_event 可能为空）---------
+def test_watchdog_monitor_detect_by_status():
+    wd = read("platform/watchdog.sh")
+    mon = read("platform/monitor.sh")
+    assert '.status=="blocked"' in wd and '.status=="failed"' in wd
+    assert '.status=="blocked"' in mon
+
+
+# --- 第八轮 P0：余额耗尽(1113) 永久故障 → 不重试/不起新 swarm --------------------
+def test_billing_dead_handling():
+    assert ".provider_billing_dead" in read("platform/monitor.sh")
+    assert ".provider_billing_dead" in read("platform/watchdog.sh")
+    assert ".provider_billing_dead" in read("platform/orchestrator.py")
+    assert "1113" in read("platform/check-models.sh")
+
+
+# --- 第八轮 P0：D26 worker Docker 后端可靠（SupplementaryGroups 根治 + 后端选择）---
+def test_docker_backend_reliability():
+    t = read("platform/launch_project.sh")
+    assert "SupplementaryGroups=docker" in t            # 根治：gateway 子进程继承 docker 组
+    assert "AUTOCODE_EXECUTOR_BACKEND" in t and "AUTOCODE_ALLOW_LOCAL_EXECUTOR" in t
+    assert "_verify_worker_profiles" in t               # D29 派发前校验
+    assert "SupplementaryGroups=docker" in read("scripts/01-deploy-platform.sh")
+
+
+# --- 第八轮 P1：D30 direct-to-QA 路径（无 fan-out 不死锁）------------------------
+def test_orchestrator_direct_to_qa():
+    t = read("platform/orchestrator.py")
+    assert "_dev_complete" in t and "expected_files_present" in t
+
+
 def test_control_plane_bind_host_configurable_and_guarded():
     # 局域网访问：bind host 可配 + 非本机+默认 token 拒绝启动
     t = read("platform/control_plane.py")

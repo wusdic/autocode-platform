@@ -29,15 +29,24 @@ hard=0; warn=0
 check() {  # label base_url model key
   local label="$1" base="$2" model="$3" key="$4" code
   if [ -z "$key" ]; then echo "⚠️  ${label}: 无 API key，跳过（限流自愈/网络问题不阻断）"; warn=$((warn+1)); return; fi
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$TIMEOUT" \
+  local body_file; body_file="$(mktemp)"
+  code=$(curl -s -o "$body_file" -w '%{http_code}' --max-time "$TIMEOUT" \
     -X POST "${base%/}/chat/completions" \
     -H "Authorization: Bearer ${key}" -H "Content-Type: application/json" \
     -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"1\"}],\"max_tokens\":1}" 2>/dev/null) || code=000
+  local body; body="$(cat "$body_file" 2>/dev/null)"; rm -f "$body_file"
   case "$code" in
     200) echo "✅ ${label}: ${model} 可用" ;;
     401|403) echo "❌ ${label}: 鉴权失败(${code})，API key 错误/无权限"; hard=$((hard+1)) ;;
     400|404) echo "❌ ${label}: 模型不可用(${code})，模型名 '${model}' 可能错误"; hard=$((hard+1)) ;;
-    429) echo "⚠️  ${label}: 限流(429)——会自愈，不算硬错误"; warn=$((warn+1)) ;;
+    429)
+      # 解析 body 区分：1113 余额不足（永久，硬错误 fail-fast）vs 1305 临时过载（可自愈，警告）。
+      if grep -Eiq '"code"[[:space:]]*:[[:space:]]*"?1113|insufficient balance|no resource package' <<<"$body"; then
+        echo "❌ ${label}: 余额不足(1113)。注意：这是项目 gateway/worker 用的 key，不是你当前聊天会话的 key。"
+        hard=$((hard+1))
+      else
+        echo "⚠️  ${label}: 临时过载/限流(429/1305)——会自愈，不算硬错误"; warn=$((warn+1))
+      fi ;;
     *) echo "⚠️  ${label}: 请求未成功(${code})，网络/超时？暂不阻断"; warn=$((warn+1)) ;;
   esac
 }

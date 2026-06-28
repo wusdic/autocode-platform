@@ -84,6 +84,39 @@ def test_adr_without_approved_creates_repair_card(tmp_path):
     assert any(a == "arch-synthesizer" and "补齐架构批准文件" in t for t, a, _ in gw.created)
 
 
+def test_direct_to_qa_when_no_fanout_but_source_exists(tmp_path):
+    # D30：dev-lead 卡 done、无 dev-worker 卡、但有真实源码 → 直接进 QA（不死锁）
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    for f in ("PRD.md", "ADR.md"):
+        (ws / "design" / f).write_text("x")
+    (ws / "design" / "approved_versions.txt").write_text("v1\n")
+    _orch(data_root, gw).tick(project)   # → development
+    (ws / "src").mkdir(exist_ok=True); (ws / "src" / "main.py").write_text("print(1)\n")
+    gw.cards = [{"id": "L", "assignee": "dev-lead", "status": "done"}]
+    assert _orch(data_root, gw).tick(project) == "qa"
+
+
+def test_direct_to_qa_blocked_when_no_source(tmp_path):
+    # 反例：dev-lead done 但无源码 → 不进 QA（防空手放行）
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    for f in ("PRD.md", "ADR.md"):
+        (ws / "design" / f).write_text("x")
+    (ws / "design" / "approved_versions.txt").write_text("v1\n")
+    _orch(data_root, gw).tick(project)
+    gw.cards = [{"id": "L", "assignee": "dev-lead", "status": "done"}]
+    assert _orch(data_root, gw).tick(project) != "qa"
+
+
+def test_billing_dead_blocks_new_swarm(tmp_path):
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    (ws / "design" / "PRD.md").write_text("prd")
+    (data_root / ".provider_billing_dead").write_text("insufficient balance")
+    assert _orch(data_root, gw).tick(project) != "architecture" and not gw.swarms
+
+
 def test_qa_done_without_status_creates_repair_card(tmp_path):
     gw = FakeGateway()
     project, ws, data_root = _project(tmp_path)
