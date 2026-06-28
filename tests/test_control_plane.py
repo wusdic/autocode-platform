@@ -109,6 +109,24 @@ def test_list_projects_survives_kanban_error(tmp_path):
     assert p["task_summary"] == {} and p["total_tasks"] == 0
 
 
+def test_kanban_non_list_shape_does_not_crash(tmp_path):
+    # 防御：即便某版本 CLI 把 list --json 返回成对象（非 list），
+    # /api/projects 列表不得 500，/tasks 必须仍返回数组（前端 Array.isArray 契约）。
+    class WrappedGateway(FakeGateway):
+        def kanban(self, project, *args):
+            return {"tasks": [{"id": "t1", "status": "done"}]}   # 非 list 形状
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=WrappedGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    lr = c.get("/api/projects", headers=_h())
+    assert lr.status_code == 200
+    p = next(p for p in lr.json()["projects"] if p["project_id"] == "proj1")
+    assert p["task_summary"] == {} and p["total_tasks"] == 0
+    tr = c.get("/api/projects/proj1/tasks", headers=_h())
+    assert tr.status_code == 200 and isinstance(tr.json(), list)
+
+
 # --- 用户面只读端点（Web UI 后端）-------------------------------------------------
 def _mk(client, pid="proj1"):
     client.post("/api/projects", json={"project_id": pid}, headers=_h())

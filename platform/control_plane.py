@@ -558,9 +558,12 @@ def create_app(
         auth(x_token)
         project = get_project(pid)
         try:
-            return gateway.kanban(project, "list", "--json")
+            out = gateway.kanban(project, "list", "--json")
         except RuntimeError as exc:
             raise HTTPException(502, str(exc))
+        # 归一成数组（与 orchestrator._cards 同口径）：保证前端看板 Array.isArray 契约，
+        # 即便某版本 CLI 返回非 list 也不让看板崩。
+        return out if isinstance(out, list) else []
 
     @app.get("/api/projects/{pid}/requirements")
     def requirements(pid: str, x_token: str = Header(None)):
@@ -671,14 +674,18 @@ def create_app(
     # ------------------------------------------------------------------ #
     def _kanban_summary(project: Project) -> tuple[dict, int]:
         try:
-            tasks = gateway.kanban(project, "list", "--json")
-            by_status: dict = {}
-            for t in tasks:
-                s = t.get("status", "?")
-                by_status[s] = by_status.get(s, 0) + 1
-            return by_status, len(tasks)
+            out = gateway.kanban(project, "list", "--json")
         except RuntimeError:
             return {}, 0
+        # 归一成数组并跳过非 dict 项（与 orchestrator._cards 一致）：单个项目 kanban 输出
+        # 异常不得让 /api/projects 整表 500（D20 设计意图：一个项目的问题不阻塞列表）。
+        tasks = out if isinstance(out, list) else []
+        by_status: dict = {}
+        for t in tasks:
+            if isinstance(t, dict):
+                s = t.get("status", "?")
+                by_status[s] = by_status.get(s, 0) + 1
+        return by_status, len(tasks)
 
     @app.get("/api/projects")
     def list_projects(x_token: str = Header(None)):
