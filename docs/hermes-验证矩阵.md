@@ -43,6 +43,7 @@
 | `config set` 写入 `profiles/<name>/config.yaml` | ✅ | 真机日志逐行确认（`✓ Set ... in .../config.yaml`） |
 | ⚠️ `config show` **不渲染** `disabled_toolsets` 等字段 | ✅ | **真机实测**：校验权限要直接读 `config.yaml`，不能靠 `config show \| grep` |
 | `approvals.mode`（manual 默认 / off 无人值守） | ✅ | **真机实测**：默认 manual 会反复弹审批中断自动化；隔离架构下设 off 安全（见 §G） |
+| `approvals.cron_mode`（**默认 deny**！approve=非交互放行） | ✅ | **真机实测（D25）**：worker 由 gateway 内嵌 dispatcher 定时派发=非交互路径，**只设 mode=off 仍被 cron_mode=deny 拦**。无人值守须一并设 `approve`（launch_project 已自动设） |
 | `toolsets`（**附加列表，非白名单**）| ✅ | **真机实测修正**：内置 `code_execution/execute_code/terminal/file` 始终可用，必须用 `agent.disabled_toolsets` 显式禁用；值用 JSON 数组（NEW-K/L）。**必含 `execute_code`**——真机 shi：只禁 `code_execution` 时 CEO 仍能用 `execute_code` 越权写码 |
 
 ## D. Hooks / 插件
@@ -86,10 +87,14 @@
 
 ## G. 审批与无人值守安全模型
 平台目标是**无人值守全自动**——没人盯着审批。Hermes 的命令审批 `approvals.mode` 默认 `manual`，会反复弹"command approval required"打断流程。本平台用**一个显式开关 `AUTOCODE_UNATTENDED`**（默认 1）统一控制：为 1 时本项目 `approvals.mode=off`；为 0 时保留人工审批。审批配置只写**本项目 HERMES_HOME**，不动用户主配置。
-> **不依赖 YOLO**：`HERMES_YOLO_MODE` 默认 **0**（不再随无人值守开 1）——yolo 有绕过 pre_tool_call hook（第二层设计闸门）的风险，安全策略不应依赖它。无人值守靠 `approvals.mode=off` 跳过审批即可，`HERMES_ACCEPT_HOOKS=1` 始终开。确需 yolo 的操作者可显式 `HERMES_YOLO_MODE=1`。
+> **命令审批的两个维度（缺一就卡自动化）**：`launch_project.sh` 在建项目时**自动**写好（只写本项目 HERMES_HOME，不动用户主配置）：
+> - `approvals.mode=off`（交互/普通路径放行，默认 manual 会反复弹审批）；
+> - `approvals.cron_mode=approve`（**非交互/定时路径放行，默认 deny**）——本平台 worker 由 gateway 内嵌 dispatcher 每 60s 定时派发，属非交互路径，**只设 mode=off 仍会被 cron_mode 拦死**（真机 D25）。
+> 二者都受 `AUTOCODE_UNATTENDED`（默认 1）控制；可用 `HERMES_APPROVALS_MODE`/`HERMES_APPROVALS_CRON_MODE` 覆盖。`AUTOCODE_UNATTENDED=0` 时退回 manual+deny（保留人工审批）。
+> **不依赖 YOLO**：`HERMES_YOLO_MODE` 默认 **0**——yolo 有绕过 pre_tool_call hook（第二层设计闸门）的风险，安全策略不应依赖它；无人值守靠上面两个 approvals 即可，`HERMES_ACCEPT_HOOKS=1` 始终开。
 
 **为何不降低实际安全**（真机报告分析，Hermes 三层安全模型）：
 - **第 1 层 HARDLINE（12 条，不可绕过）**：`rm -rf /`、`mkfs`、`dd` 写裸设备、fork bomb、`shutdown` 等 + sudo-stdin guard——**off/yolo 也拦得住**。
 - 第 2 层 DANGEROUS（61 条）、第 3 层 Tirith（~80 条）：off 跳过。
 - 但**触发面已被架构消除**：CEO 无终端/无代码工具（`disabled_toolsets` 含 code_execution/**execute_code**/terminal/file）；dev-worker 在 Docker（源码级豁免 approval.py，approval 本就不作用于容器内）；gateway 只跑 `hermes kanban`。
-> 结论：安全靠**架构隔离 + 设计闸门 + 监测告警**实现，不靠人工审批拦截。生产若需更严，把 `HERMES_APPROVALS_MODE=smart` 并确保 worker 全在 Docker。
+> 结论：无人值守下，**普通 + DANGEROUS + Tirith 命令全部自动放行**（不再弹审批、不阻塞流水线）；**唯一不自动放行的是 HARDLINE 12 条灾难性命令**（`rm -rf /`/`mkfs`/fork bomb 等）——这是有意保留的不可绕过红线，且本平台角色（CEO 无终端、worker 在受限 Docker）**正常工作根本不会触发它**。安全靠 架构隔离 + 设计闸门 + 监测告警 实现，不靠人工审批拦截。生产若需更严，把 `HERMES_APPROVALS_MODE=smart` 并确保 worker 全在 Docker。

@@ -295,11 +295,19 @@ hermes config set kanban.dispatch_in_gateway true
 # DANGEROUS(61)/Tirith(~80) 审批，否则自动化流程被 approval 反复打断。设 0 则保留人工审批。
 # 安全不降级——HARDLINE(12 条: rm -rf /, mkfs, dd, fork bomb…) + sudo-stdin guard 仍不可绕过；
 # CEO 无终端、dev-worker 在非 root Docker。审批配置只写本项目 HERMES_HOME，不动用户主配置。
+#
+# ⚠️ 命令审批有【两个】维度，缺一就会卡住自动化：
+#   approvals.mode       —— 交互/普通路径的审批（manual|smart|off）。
+#   approvals.cron_mode  —— 【非交互/定时触发】路径的审批，**默认 deny**！本平台的 worker 由
+#                            gateway 内嵌 dispatcher（每 60s tick）派发，属非交互路径——只设
+#                            mode=off 仍会被 cron_mode=deny 拦下（真机 D25）。必须一并设 approve。
 AUTOCODE_UNATTENDED="${AUTOCODE_UNATTENDED:-1}"
 if [ "${AUTOCODE_UNATTENDED}" = "1" ]; then
   hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-off}"
+  hermes config set approvals.cron_mode "${HERMES_APPROVALS_CRON_MODE:-approve}" 2>/dev/null || true
 else
   hermes config set approvals.mode "${HERMES_APPROVALS_MODE:-manual}"
+  hermes config set approvals.cron_mode "${HERMES_APPROVALS_CRON_MODE:-deny}" 2>/dev/null || true
 fi
 # 低配机器（<4 核）默认降并发到 1，减少 429/OOM/CPU 排队（报告环境 2 核易排队）。
 MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-3}"

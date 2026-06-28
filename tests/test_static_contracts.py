@@ -68,6 +68,8 @@ def test_launcher_no_plugins_list_grep_q_antipattern():
 def test_launcher_sets_approvals_and_yolo():
     text = read("platform/launch_project.sh")
     assert "approvals.mode" in text
+    # 命令审批两个维度都要设：cron_mode 默认 deny，只设 mode 仍会卡非交互/定时派发的 worker（D25）
+    assert "approvals.cron_mode" in text and "approve" in text
     assert "HERMES_YOLO_MODE" in text
     assert "AUTOCODE_UNATTENDED" in text
 
