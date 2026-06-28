@@ -45,7 +45,8 @@
   <aside><div id="projects" class="mut">（先填 token 连接）</div></aside>
   <section>
     <div class="tabs">
-      <button data-tab="state" class="active">状态</button>
+      <button data-tab="state" class="active">状态/交付</button>
+      <button data-tab="board">进度看板</button>
       <button data-tab="artifacts">产物</button>
       <button data-tab="chat">对话</button>
     </div>
@@ -58,7 +59,16 @@
 //          ② 所有来自 API / AI 产物的文本一律 textContent / 转义后插入，绝不 innerHTML 原文；
 //          ③ Markdown/产物用 <pre> 原样展示（textContent），不解析 HTML —— 从根上杜绝存储型 XSS。
 const $ = (s, r=document) => r.querySelector(s);
-const state = { token:"", pid:null, tab:"state" };
+const state = { token:"", pid:null, tab:"state", _timer:null };
+
+// 流水线阶段顺序（与后端 state.stage 一致）：用于进度条高亮"当前推进到哪一步"。
+const STAGES = ["created","product","architecture","development","qa","release","complete"];
+const STAGE_LABEL = { created:"建项目", product:"产品设计", architecture:"架构",
+  development:"开发", qa:"测试", release:"发布", complete:"完成" };
+// 看板状态 → 颜色（done 绿 / 阻塞失败 红 / 进行中 蓝 / 其它灰），与 :root 变量同源。
+const STATUS_COLOR = { done:"#3ecf8e", complete:"#3ecf8e", blocked:"#ff5d5d",
+  failed:"#ff5d5d", in_progress:"#7db4ff", running:"#7db4ff", ready:"#e6e6e6",
+  todo:"#8a90a0", backlog:"#8a90a0" };
 
 // 切换 Tab 的【唯一】入口：同时更新 state.tab、按钮高亮、视图——避免"程序切 tab 但高亮没动"的不一致。
 function switchTab(name){
@@ -103,16 +113,15 @@ async function loadProjects(){
 }
 
 async function render(){
+  stopAutoRefresh();   // 切 tab/换项目先停掉旧的定时刷新，避免多个看板轮询叠加
   const v = $("#view");
   if (!state.pid) { v.innerHTML = '<p class="mut">选择左侧项目。</p>'; return; }
   v.textContent = "加载中…";
   try {
     if (state.tab === "state") {
-      const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/state");
-      v.innerHTML = "";
-      const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(d, null, 2);   // textContent，绝不解析
-      v.appendChild(pre);
+      await renderState(v);
+    } else if (state.tab === "board") {
+      await renderBoard(v);
     } else if (state.tab === "artifacts") {
       const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/artifacts");
       v.innerHTML = "<p class='mut'>点击查看（原样文本展示，不解析 HTML）：</p>";
@@ -143,6 +152,167 @@ async function viewArtifact(path){
     out.textContent = d.binary ? "(二进制文件，不展示)"
       : (d.content + (d.truncated ? "\n…(已截断)" : ""));   // textContent：AI 产物原样，不当 HTML
   } catch (e) { out.textContent = e.message; }
+}
+
+// 自动刷新：仅在页面可见时轮询（visibilityState），离开 tab/项目时由 render() 统一 stop。
+function startAutoRefresh(fn){
+  stopAutoRefresh();
+  state._timer = setInterval(() => {
+    if (document.visibilityState === "visible") fn();
+  }, 5000);
+}
+function stopAutoRefresh(){
+  if (state._timer) { clearInterval(state._timer); state._timer = null; }
+}
+
+// 进度条：一行小方块，按 STAGES 顺序高亮"已完成/当前/未到"三态。
+function pipelineBar(curStage){
+  const idx = STAGES.indexOf(curStage);
+  const wrap = document.createElement("div");
+  wrap.className = "row"; wrap.style.flexWrap = "wrap";
+  STAGES.forEach((s, i) => {
+    const cell = document.createElement("span");
+    const done = idx >= 0 && i < idx, cur = i === idx;
+    cell.textContent = STAGE_LABEL[s] || s;
+    cell.style.cssText = "padding:3px 9px;border-radius:12px;font-size:12px;border:1px solid "
+      + (cur ? "#4f8cff" : done ? "#3ecf8e" : "#2a2f3a") + ";color:"
+      + (cur ? "#bcd4ff" : done ? "#8af0c0" : "#8a90a0") + ";background:"
+      + (cur ? "#16243d" : done ? "#13311f" : "transparent");
+    wrap.appendChild(cell);
+    if (i < STAGES.length - 1) {
+      const sep = document.createElement("span");
+      sep.textContent = "→"; sep.className = "mut"; sep.style.fontSize = "11px";
+      wrap.appendChild(sep);
+    }
+  });
+  return wrap;
+}
+
+// 状态/交付页：进度条 + 交付摘要（是否真正完成/启动命令）+ 设计产物勾选 + 变更请求入口。
+async function renderState(v){
+  const [st, dl] = await Promise.all([
+    api("/api/projects/" + encodeURIComponent(state.pid) + "/state"),
+    api("/api/projects/" + encodeURIComponent(state.pid) + "/deliverable").catch(() => null),
+  ]);
+  v.innerHTML = "";
+  const curStage = (st.state && st.state.stage) || "created";
+
+  const h1 = document.createElement("div"); h1.className = "mut";
+  h1.textContent = "流水线进度"; h1.style.margin = "2px 0 6px";
+  v.appendChild(h1);
+  v.appendChild(pipelineBar(curStage));
+
+  // 交付摘要：is_done 必须四项皆满足（见后端 deliverable），这里给出明确"是否可交付"结论。
+  if (dl) {
+    const card = document.createElement("div");
+    card.style.cssText = "margin:14px 0;padding:12px;border-radius:8px;border:1px solid "
+      + (dl.is_done ? "#3ecf8e" : "#2a2f3a") + ";background:#0b0d12";
+    const badge = document.createElement("div");
+    badge.textContent = dl.is_done ? "✅ 已交付（可运行）" : "⏳ 进行中 / 尚未通过交付门";
+    badge.style.cssText = "font-weight:600;color:" + (dl.is_done ? "#3ecf8e" : "#e6e6e6");
+    card.appendChild(badge);
+    const meta = document.createElement("div"); meta.className = "mut";
+    meta.style.marginTop = "6px"; meta.style.fontSize = "12px";
+    meta.textContent = "阶段：" + (dl.stage || "?")
+      + "　·　QA 放行：" + fmtBool(dl.release_allowed)
+      + "　·　完整性：" + fmtBool(dl.integrity_ok)
+      + (dl.completion_mode ? "　·　完成方式：" + dl.completion_mode : "");
+    card.appendChild(meta);
+    if (dl.run_command) {
+      const rc = document.createElement("div"); rc.style.marginTop = "8px";
+      const lab = document.createElement("span"); lab.className = "mut";
+      lab.textContent = "运行方式："; rc.appendChild(lab);
+      const code = document.createElement("code");
+      code.textContent = dl.run_command;   // textContent：清单内容原样，不解析
+      code.style.cssText = "background:#11141a;padding:2px 6px;border-radius:4px;border:1px solid #2a2f3a";
+      rc.appendChild(code); card.appendChild(rc);
+    }
+    v.appendChild(card);
+  }
+
+  // 设计产物勾选：一眼看出 PRD/ADR/requirements 等关键文档是否就位。
+  const dh = document.createElement("div"); dh.className = "mut";
+  dh.textContent = "设计产物"; dh.style.margin = "10px 0 4px"; v.appendChild(dh);
+  const dul = document.createElement("ul"); dul.style.listStyle = "none"; dul.style.paddingLeft = "0";
+  for (const [name, ok] of Object.entries(st.design_files || {})) {
+    const li = document.createElement("li"); li.style.cursor = "default";
+    li.textContent = (ok ? "✓ " : "✗ ") + name;
+    li.style.color = ok ? "#3ecf8e" : "#8a90a0";
+    dul.appendChild(li);
+  }
+  v.appendChild(dul);
+
+  // 变更请求入口：开发完成后想改/加需求，从这里建 change-request 卡（change-guardian 先设计再执行）。
+  const crh = document.createElement("div"); crh.className = "mut";
+  crh.textContent = "提交变更请求（已交付后追加/修改需求）";
+  crh.style.margin = "12px 0 4px"; v.appendChild(crh);
+  const crRow = document.createElement("div"); crRow.className = "row";
+  const crIn = document.createElement("input");
+  crIn.id = "crInput"; crIn.placeholder = "描述要改/要加的需求…"; crIn.style.flex = "1";
+  const crBtn = document.createElement("button"); crBtn.textContent = "提交变更";
+  crRow.appendChild(crIn); crRow.appendChild(crBtn); v.appendChild(crRow);
+  crBtn.onclick = submitChangeRequest;
+
+  // QA 详情（若有）：原样 JSON，方便排查为何未放行。
+  if (st.qa_status && Object.keys(st.qa_status).length) {
+    const qh = document.createElement("div"); qh.className = "mut";
+    qh.textContent = "QA 状态"; qh.style.margin = "12px 0 4px"; v.appendChild(qh);
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(st.qa_status, null, 2);   // textContent，绝不解析
+    v.appendChild(pre);
+  }
+}
+function fmtBool(x){ return x === true ? "是" : x === false ? "否" : "—"; }
+
+async function submitChangeRequest(){
+  const inp = $("#crInput"); const change = (inp && inp.value || "").trim();
+  if (!change) { alert("请先描述变更内容"); return; }
+  if (!confirm("提交变更请求？\n\n平台会建一张 change-request 卡交给 change-guardian（先设计再执行），不会直接改代码。")) return;
+  try {
+    await api("/api/projects/" + encodeURIComponent(state.pid) + "/change-requests",
+              "POST", { change });
+    inp.value = "";
+    alert("已提交变更请求，可在【进度看板】查看 change-guardian 的卡。");
+  } catch (e) { alert("提交失败：" + e.message); }
+}
+
+// 进度看板：实时看每张卡（任务）由谁负责、什么状态。每 5 秒自动刷新（仅页面可见时）。
+async function renderBoard(v){
+  v.innerHTML = "";
+  const note = document.createElement("div"); note.className = "mut";
+  note.style.marginBottom = "8px"; note.textContent = "每 5 秒自动刷新（页面可见时）";
+  v.appendChild(note);
+  const box = document.createElement("div"); box.id = "boardBox"; v.appendChild(box);
+  await loadBoard();
+  startAutoRefresh(loadBoard);
+}
+async function loadBoard(){
+  const box = $("#boardBox"); if (!box) return;
+  try {
+    const tasks = await api("/api/projects/" + encodeURIComponent(state.pid) + "/tasks");
+    box.innerHTML = "";
+    if (!Array.isArray(tasks) || !tasks.length) {
+      box.textContent = "（暂无任务卡）"; box.className = "mut"; return;
+    }
+    box.className = "";
+    for (const t of tasks) {
+      const st = (t.status || "todo").toLowerCase();
+      const row = document.createElement("div"); row.className = "row";
+      row.style.cssText = "padding:6px 8px;border-bottom:1px solid #1a1d24;align-items:flex-start";
+      const dot = document.createElement("span");
+      dot.style.cssText = "width:9px;height:9px;border-radius:50%;flex:0 0 auto;margin-top:5px;background:"
+        + (STATUS_COLOR[st] || "#8a90a0");
+      row.appendChild(dot);
+      const mid = document.createElement("div"); mid.style.flex = "1";
+      const title = document.createElement("div"); title.textContent = t.title || "(无标题)";
+      mid.appendChild(title);
+      const sub = document.createElement("div"); sub.className = "mut"; sub.style.fontSize = "12px";
+      sub.textContent = (t.assignee ? "@" + t.assignee : "未指派") + "　·　" + st;
+      mid.appendChild(sub);
+      row.appendChild(mid);
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = e.message; box.className = "err"; }
 }
 
 // 与 CEO 多轮对话：左侧选项目后，在此发需求/沟通。CEO 是唯一对话入口（设计目标）。

@@ -400,6 +400,27 @@ def test_webui_tab_switching_unified():
     assert "state.tab = \"chat\"" not in html
 
 
+# --- 进度看板 / 交付视图 / 变更请求：把已有但未露出的端点接进 UI（不新建冗余页）------
+def test_webui_surfaces_board_and_deliverable():
+    html = read("platform/webui.html")
+    # 进度看板：拉 /tasks，按卡渲染负责人+状态，5 秒自动刷新（仅页面可见）
+    assert "function renderBoard" in html and "function loadBoard" in html
+    assert "/tasks" in html
+    assert "function startAutoRefresh" in html and "function stopAutoRefresh" in html
+    assert "visibilityState" in html        # 只在可见时轮询，省资源
+    # 状态/交付视图：拉 /deliverable，展示是否真正交付 + 运行方式
+    assert "function renderState" in html and "/deliverable" in html
+    # 变更请求入口：已交付后追加/改需求 → 建 change-request 卡
+    assert "function submitChangeRequest" in html and "change-requests" in html
+
+
+def test_webui_autorefresh_is_torn_down_on_render():
+    # 切 tab/换项目必须先 stopAutoRefresh，避免多个看板轮询叠加泄漏
+    html = read("platform/webui.html")
+    assert "stopAutoRefresh();" in html.split("async function render(")[1].split("}")[0] \
+        or "stopAutoRefresh();   //" in html
+
+
 def test_confirm_plan_persists_requirements_when_empty():
     # 后端：UI 不带 requirements 时也要落盘 requirements.yaml（产品委员会输入），从 CEO 对话推导
     t = read("platform/control_plane.py")
