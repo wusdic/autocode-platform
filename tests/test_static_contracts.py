@@ -334,6 +334,9 @@ def test_ceo_soul_finalizes_requirements_and_prompts_button():
     assert "确认需求并启动设计" in soul          # 与 webui 按钮文案一致
     for k in ("core_need", "extended_need", "non_goals", "acceptance"):
         assert k in soul, k
+    # 硬性顺序：点击按钮确认前，CEO 处于纯沟通阶段，绝不分发工作/建卡/起 swarm
+    assert "绝不" in soul and "kanban" in soul and "swarm" in soul
+    assert "纯沟通阶段" in soul
     # 落盘的 requirements.yaml 与定版四块口径一致（acceptance_core 也要被推导）
     cp = read("platform/control_plane.py")
     assert "acceptance_core" in cp
