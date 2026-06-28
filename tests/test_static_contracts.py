@@ -421,6 +421,14 @@ def test_webui_autorefresh_is_torn_down_on_render():
         or "stopAutoRefresh();   //" in html
 
 
+def test_webui_guards_stale_async_render():
+    # 异步渲染竞态：切走 tab 后，过期请求的返回不得覆盖新页面，看板也不得起悬挂定时器。
+    # 用 nav 序号守卫（render 自增 _nav，子渲染 await 后比对）。
+    html = read("platform/webui.html")
+    assert "_nav" in html and "++state._nav" in html
+    assert "state._nav !== nav" in html
+
+
 def test_confirm_plan_persists_requirements_when_empty():
     # 后端：UI 不带 requirements 时也要落盘 requirements.yaml（产品委员会输入），从 CEO 对话推导
     t = read("platform/control_plane.py")

@@ -59,7 +59,7 @@
 //          ② 所有来自 API / AI 产物的文本一律 textContent / 转义后插入，绝不 innerHTML 原文；
 //          ③ Markdown/产物用 <pre> 原样展示（textContent），不解析 HTML —— 从根上杜绝存储型 XSS。
 const $ = (s, r=document) => r.querySelector(s);
-const state = { token:"", pid:null, tab:"state", _timer:null };
+const state = { token:"", pid:null, tab:"state", _timer:null, _nav:0 };
 
 // 流水线阶段顺序（与后端 state.stage 一致）：用于进度条高亮"当前推进到哪一步"。
 const STAGES = ["created","product","architecture","development","qa","release","complete"];
@@ -114,16 +114,18 @@ async function loadProjects(){
 
 async function render(){
   stopAutoRefresh();   // 切 tab/换项目先停掉旧的定时刷新，避免多个看板轮询叠加
+  const nav = ++state._nav;   // 本次渲染序号：异步返回后若已切走（nav 变了），丢弃过期写入
   const v = $("#view");
   if (!state.pid) { v.innerHTML = '<p class="mut">选择左侧项目。</p>'; return; }
   v.textContent = "加载中…";
   try {
     if (state.tab === "state") {
-      await renderState(v);
+      await renderState(v, nav);
     } else if (state.tab === "board") {
-      await renderBoard(v);
+      await renderBoard(v, nav);
     } else if (state.tab === "artifacts") {
       const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/artifacts");
+      if (state._nav !== nav) return;   // 已切走：别用过期产物列表盖掉新页面
       v.innerHTML = "<p class='mut'>点击查看（原样文本展示，不解析 HTML）：</p>";
       const ul = document.createElement("ul");
       for (const a of d.artifacts) {
@@ -138,6 +140,7 @@ async function render(){
       await renderChat(v);
     }
   } catch (e) {
+    if (state._nav !== nav) return;   // 过期请求的报错也别盖掉新页面
     v.innerHTML = ""; const p = document.createElement("p"); p.className = "err";
     p.textContent = e.message; v.appendChild(p);
   }
@@ -189,11 +192,12 @@ function pipelineBar(curStage){
 }
 
 // 状态/交付页：进度条 + 交付摘要（是否真正完成/启动命令）+ 设计产物勾选 + 变更请求入口。
-async function renderState(v){
+async function renderState(v, nav){
   const [st, dl] = await Promise.all([
     api("/api/projects/" + encodeURIComponent(state.pid) + "/state"),
     api("/api/projects/" + encodeURIComponent(state.pid) + "/deliverable").catch(() => null),
   ]);
+  if (nav != null && state._nav !== nav) return;   // 已切走：丢弃过期渲染
   v.innerHTML = "";
   const curStage = (st.state && st.state.stage) || "created";
 
@@ -277,13 +281,14 @@ async function submitChangeRequest(){
 }
 
 // 进度看板：实时看每张卡（任务）由谁负责、什么状态。每 5 秒自动刷新（仅页面可见时）。
-async function renderBoard(v){
+async function renderBoard(v, nav){
   v.innerHTML = "";
   const note = document.createElement("div"); note.className = "mut";
   note.style.marginBottom = "8px"; note.textContent = "每 5 秒自动刷新（页面可见时）";
   v.appendChild(note);
   const box = document.createElement("div"); box.id = "boardBox"; v.appendChild(box);
   await loadBoard();
+  if (nav != null && state._nav !== nav) return;   // 已切走：别再起自动刷新（防定时器泄漏）
   startAutoRefresh(loadBoard);
 }
 async function loadBoard(){
