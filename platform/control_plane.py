@@ -471,15 +471,17 @@ def create_app(
             try:
                 r = await gateway.chat(
                     project,
-                    "根据我们刚才的沟通，输出本项目的需求双层结构。**只输出一个 yaml 代码块**，"
-                    "含 core_need、extended_need、non_goals 三个键，不要任何解释文字。",
+                    "根据我们刚才确认的【定版需求】，输出本项目的需求结构。**只输出一个 yaml 代码块**，"
+                    "含 core_need、extended_need、non_goals、acceptance_core 四个键（与你给用户的定版四块一致），"
+                    "不要任何解释文字。",
                     "main")
                 text = r["choices"][0]["message"]["content"]
             except Exception:
                 text = ""
             m = re.search(r"```(?:ya?ml)?\s*\n(.*?)```", text, re.S)
             content = (m.group(1) if m else text).strip()
-            req_path.write_text(content or "core_need: 见对话记录\nextended_need: []\nnon_goals: []\n")
+            req_path.write_text(content
+                or "core_need: 见对话记录\nextended_need: []\nnon_goals: []\nacceptance_core: []\n")
         if not req_path.exists():
             raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
         # 显式编排：平台直接创建产品委员会 swarm（见手册阶段 7）。

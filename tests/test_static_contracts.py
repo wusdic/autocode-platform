@@ -327,6 +327,20 @@ def test_ceo_soul_forbids_coding_and_routes_pipeline():
     assert "新建一个独立项目" in soul and "core_need" in soul
 
 
+def test_ceo_soul_finalizes_requirements_and_prompts_button():
+    # 确认理解后：CEO 给出"定版需求"四块 + 引导用户点击启动按钮（与 webui 按钮文案一致）
+    soul = read("platform-base/templates/SOUL.ceo.md")
+    assert "定版需求" in soul
+    assert "确认需求并启动设计" in soul          # 与 webui 按钮文案一致
+    for k in ("core_need", "extended_need", "non_goals", "acceptance"):
+        assert k in soul, k
+    # 落盘的 requirements.yaml 与定版四块口径一致（acceptance_core 也要被推导）
+    cp = read("platform/control_plane.py")
+    assert "acceptance_core" in cp
+    # 按钮文案确实存在于 webui（防两边漂移）
+    assert "确认需求并启动设计" in read("platform/webui.html")
+
+
 def test_webui_guards_new_requirement_and_can_create_project():
     html = read("platform/webui.html")
     assert "NEW_REQ_RE" in html and "confirm(" in html        # 新需求二次确认
