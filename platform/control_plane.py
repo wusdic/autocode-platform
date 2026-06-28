@@ -457,15 +457,31 @@ def create_app(
                 state = {}
         if state.get("product_started") or state.get("arch_started"):
             return {"status": "already-started", "swarm": "product-council"}
-        # 闭环：先把用户确认的需求双层结构落盘为 requirements.yaml（CEO 无 file 工具写不了；
-        # 产品委员会 swarm 又以它为输入），写完立即 read-back 校验存在，再启动 swarm。
+        # 闭环：把需求双层结构落盘为 requirements.yaml（CEO 无 file 工具写不了；产品委员会 swarm
+        # 以它为输入）。优先用请求体显式传入；Web UI 的"确认需求"只点按钮、不带 requirements，
+        # 则**从 CEO 对话推导**——让 CEO 仅输出一个 yaml 代码块（core_need/extended_need/non_goals），
+        # 由网关抽取落盘。否则产品委员会的 goal 引用的 design/requirements.yaml 根本不存在（真机隐患）。
+        design_dir = ws / "design"
+        design_dir.mkdir(parents=True, exist_ok=True)
+        req_path = design_dir / "requirements.yaml"
         if body and body.requirements:
-            design_dir = ws / "design"
-            design_dir.mkdir(parents=True, exist_ok=True)
-            req_path = design_dir / "requirements.yaml"
             req_path.write_text(body.requirements)
-            if not req_path.exists():
-                raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
+        elif not req_path.exists():
+            text = ""
+            try:
+                r = await gateway.chat(
+                    project,
+                    "根据我们刚才的沟通，输出本项目的需求双层结构。**只输出一个 yaml 代码块**，"
+                    "含 core_need、extended_need、non_goals 三个键，不要任何解释文字。",
+                    "main")
+                text = r["choices"][0]["message"]["content"]
+            except Exception:
+                text = ""
+            m = re.search(r"```(?:ya?ml)?\s*\n(.*?)```", text, re.S)
+            content = (m.group(1) if m else text).strip()
+            req_path.write_text(content or "core_need: 见对话记录\nextended_need: []\nnon_goals: []\n")
+        if not req_path.exists():
+            raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
         # 显式编排：平台直接创建产品委员会 swarm（见手册阶段 7）。
         gateway.swarm(
             project,
@@ -706,7 +722,8 @@ def create_app(
         return {"project_id": pid, "state": state, "design_files": design_files,
                 "qa_status": qa_status, "workspace": str(ws)}
 
-    # 只读白名单：用户面只暴露交付面，绝不暴露 .hermes/.autocode/design 的钥匙文件等内部物。
+    # 只读白名单：只放行交付面（design/src/tests/reports-qa/reports-release/dist + README，只读）；
+    # 绝不暴露 .hermes / .autocode 等内部运行态目录，并用 is_relative_to 防路径穿越。
     def _safe_artifact(ws: Path, rel: str) -> Path:
         root = ws.resolve()
         target = (root / rel).resolve()

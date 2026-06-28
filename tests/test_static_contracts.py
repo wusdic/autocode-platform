@@ -392,6 +392,20 @@ def test_webui_has_confirm_plan_button():
     assert "function confirmPlan" in html and "confirm-plan" in html
 
 
+def test_webui_tab_switching_unified():
+    # Tab 切换只有一个入口 switchTab（避免程序切 tab 但高亮不同步）
+    html = read("platform/webui.html")
+    assert "function switchTab" in html
+    assert "state.tab = \"state\"; render()" not in html   # 旧的散落写法已统一
+    assert "state.tab = \"chat\"" not in html
+
+
+def test_confirm_plan_persists_requirements_when_empty():
+    # 后端：UI 不带 requirements 时也要落盘 requirements.yaml（产品委员会输入），从 CEO 对话推导
+    t = read("platform/control_plane.py")
+    assert "requirements.yaml" in t and "core_need" in t
+
+
 # --- 第八轮 P0：watchdog/monitor 按 status 检测异常（last_event 可能为空）---------
 def test_watchdog_monitor_detect_by_status():
     wd = read("platform/watchdog.sh")

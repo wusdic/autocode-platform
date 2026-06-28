@@ -60,9 +60,13 @@
 const $ = (s, r=document) => r.querySelector(s);
 const state = { token:"", pid:null, tab:"state" };
 
-function esc(s){ return String(s==null?"":s)
-  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-  .replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+// 切换 Tab 的【唯一】入口：同时更新 state.tab、按钮高亮、视图——避免"程序切 tab 但高亮没动"的不一致。
+function switchTab(name){
+  state.tab = name;
+  for (const b of document.querySelectorAll(".tabs button"))
+    b.classList.toggle("active", b.dataset.tab === name);
+  render();
+}
 
 async function api(path, method="GET", body=null){
   const opts = { method, headers: { "X-Token": state.token } };
@@ -176,7 +180,7 @@ async function confirmPlan(){
     const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/confirm-plan", "POST", {});
     await loadConversation();
     if (cbtn) cbtn.textContent = d.status === "already-started" ? "已启动（流水线运行中）" : "✅ 已启动设计";
-    state.tab = "state"; render();   // 切到状态页看推进
+    switchTab("state");   // 切到状态页看推进（统一入口，同步高亮）
   } catch (e) {
     if (cbtn) { cbtn.disabled = false; cbtn.textContent = "✅ 确认需求并启动设计"; }
     alert("启动失败：" + e.message);
@@ -217,11 +221,7 @@ async function sendMessage(){
 }
 
 for (const b of document.querySelectorAll(".tabs button")) {
-  b.onclick = () => {
-    state.tab = b.dataset.tab;
-    for (const x of document.querySelectorAll(".tabs button")) x.classList.toggle("active", x === b);
-    render();
-  };
+  b.onclick = () => switchTab(b.dataset.tab);
 }
 async function createProject(){
   if (!state.token) { alert("请先填 token 连接"); return; }
@@ -229,8 +229,9 @@ async function createProject(){
   if (!id) return;
   try {
     await api("/api/projects", "POST", { project_id: id });
-    state.pid = id; state.tab = "chat";
-    await loadProjects(); render();
+    state.pid = id;
+    await loadProjects();
+    switchTab("chat");   // 新项目直接进对话页（统一入口，同步高亮）
   } catch (e) { alert("创建失败：" + e.message); }
 }
 $("#newproj").onclick = createProject;

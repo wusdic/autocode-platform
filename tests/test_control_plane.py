@@ -116,6 +116,14 @@ def _mk(client, pid="proj1"):
     return Path(client.data_root) / pid / "workspace"
 
 
+def test_confirm_plan_without_requirements_persists_file(client):
+    # Web UI 的"确认需求"只点按钮、不带 requirements → 仍必须落盘 requirements.yaml（产品委员会输入）
+    ws = _mk(client)
+    r = client.post("/api/projects/proj1/confirm-plan", json={}, headers=_h())
+    assert r.status_code == 200 and r.json()["status"] == "plan-confirmed"
+    assert (ws / "design" / "requirements.yaml").exists()
+
+
 def test_confirm_plan_idempotent(client):
     _mk(client)
     r1 = client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core: x"}, headers=_h())
