@@ -368,18 +368,37 @@ _verify_worker_profiles() {
   for r in dev-worker-1 dev-worker-2 qa release; do
     cfg="${HERMES_HOME}/profiles/$r/config.yaml"
     "$_PYBIN" - "$cfg" "$r" "${EXECUTOR_BACKEND}" <<'PY' || ok=0
-import sys, yaml, pathlib
+import sys                      # 单独先 import，确保 sys 永远可用（即便后续 import 失败也不会 NameError）
+import pathlib
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.stderr.write("  ❌ 校验脚本缺 PyYAML：请在平台 venv 安装（pip install pyyaml）。\n")
+    sys.exit(2)
 cfg, role, be = sys.argv[1], sys.argv[2], sys.argv[3]
-d = yaml.safe_load(pathlib.Path(cfg).read_text()) if pathlib.Path(cfg).exists() else {}
-def fail(m): print(f"  ❌ {role}: {m}"); sys.exit(1)
-ts = (d.get("toolsets") or [])
-if not isinstance(ts, list): fail("toolsets 不是 YAML 列表（被写成字符串？）")
-for need in ("terminal", "file", "kanban"):
-    if need not in ts: fail(f"toolsets 缺 {need}（Hermes #22924 回归，worker 无法跑 shell/写文件）")
-dis = ((d.get("agent") or {}).get("disabled_toolsets") or [])
-if not isinstance(dis, list) or "execute_code" not in dis: fail("disabled_toolsets 缺 execute_code 或非列表")
+try:
+    d = yaml.safe_load(pathlib.Path(cfg).read_text()) if pathlib.Path(cfg).exists() else {}
+except Exception as e:
+    sys.stderr.write(f"  ❌ {role}: 读取/解析 {cfg} 失败：{e}\n")
+    sys.exit(1)
+# 收集所有问题一次性报全（不是碰到第一个就退），且写 stderr —— 控制平面会把它带进 502。
+problems = []
+ts = d.get("toolsets") or []
+if not isinstance(ts, list):
+    problems.append("toolsets 不是 YAML 列表（被写成字符串？）")
+else:
+    for need in ("terminal", "file", "kanban"):
+        if need not in ts:
+            problems.append(f"toolsets 缺 {need}（Hermes #22924 回归，worker 无法跑 shell/写文件）")
+dis = (d.get("agent") or {}).get("disabled_toolsets") or []
+if not isinstance(dis, list) or "execute_code" not in dis:
+    problems.append("disabled_toolsets 缺 execute_code 或非列表")
 tb = (d.get("terminal") or {}).get("backend")
-if tb != be: fail(f"terminal.backend={tb!r} 与选定 {be!r} 不一致")
+if tb != be:
+    problems.append(f"terminal.backend={tb!r} 与选定后端 {be!r} 不一致")
+for p in problems:
+    sys.stderr.write(f"  ❌ {role}: {p}\n")
+sys.exit(1 if problems else 0)
 PY
   done
   [ "$ok" = 1 ]
