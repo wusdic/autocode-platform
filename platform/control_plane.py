@@ -231,8 +231,22 @@ class HermesGateway:
         self.settings = settings
 
     def launch(self, pid: str, port: int) -> Project:
-        """运行 launch_project.sh，建实例 + board + profiles + gateway。"""
-        subprocess.run(["bash", self.settings.launcher, pid, str(port)], check=True)
+        """运行 launch_project.sh，建实例 + board + profiles + gateway。
+
+        **捕获输出并在失败时带出真实原因**：脚本 ``set -euo pipefail`` 下任何
+        hermes/docker 命令非 0 都会中止，若不捕获，控制平面只能报 "exit status 1"，
+        运维无法诊断（缺 key / docker 不可用 / 沙箱镜像缺失 / 模型预检失败 等都被吞）。
+        失败时取 stdout+stderr 末尾若干行抛出，由 create_project 透到 502。
+        """
+        proc = subprocess.run(
+            ["bash", self.settings.launcher, pid, str(port)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            lines = [l for l in ((proc.stdout or "") + (proc.stderr or "")).splitlines()
+                     if l.strip()]
+            tail = "\n".join(lines[-15:])[-1500:] or "(launcher 无输出)"
+            raise RuntimeError(f"launch_project.sh 退出码 {proc.returncode}：\n{tail}")
         home = f"{self.settings.data_root}/{pid}/.hermes"
         workspace = f"{self.settings.data_root}/{pid}/workspace"
         key = self._read_api_key(home)

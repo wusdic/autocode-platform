@@ -109,6 +109,31 @@ def test_list_projects_survives_kanban_error(tmp_path):
     assert p["task_summary"] == {} and p["total_tasks"] == 0
 
 
+def test_launch_failure_surfaces_script_output(tmp_path):
+    # 真实 HermesGateway.launch：launcher 非 0 退出时，必须把脚本 stdout/stderr 尾部
+    # 透到 502，否则只看到 "exit status 1" 无法诊断（缺 key/docker 不可用/镜像缺失…）。
+    script = tmp_path / "fail_launcher.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo '==> [1/6] 建实例'\n"
+        "echo '❌ docker 当前上下文不可用且未允许 local 降级，拒绝建项目。' >&2\n"
+        "exit 1\n"
+    )
+    settings = cp.Settings(token=TOKEN, base_port=9100, data_root=str(tmp_path),
+                           launcher=str(script))
+    app = cp.create_app(settings=settings)   # gateway=None → 真实 HermesGateway
+    c = TestClient(app)
+    r = c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert "docker 当前上下文不可用" in detail   # 真实失败原因被带出
+    assert "退出码 1" in detail
+    # 失败后端口要回滚（不泄漏孤儿占用）
+    import json as _j
+    ports = _j.loads((tmp_path / ".ports.json").read_text()) if (tmp_path / ".ports.json").exists() else {"assigned": {}}
+    assert "proj1" not in ports.get("assigned", {})
+
+
 def test_kanban_non_list_shape_does_not_crash(tmp_path):
     # 防御：即便某版本 CLI 把 list --json 返回成对象（非 list），
     # /api/projects 列表不得 500，/tasks 必须仍返回数组（前端 Array.isArray 契约）。
