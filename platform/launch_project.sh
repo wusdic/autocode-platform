@@ -25,7 +25,7 @@ WORKSPACE="${PROOT}/workspace"
 # 两个大模型：GLM-5.2（默认）+ DeepSeek。zai 角色用 glm-5.2，跨供应商质疑角色用 deepseek。
 # 若你的 z.ai 账号无 glm-5.2，用环境变量改：ZAI_PRIMARY_MODEL / ZAI_SECONDARY_MODEL。
 ZAI_PROVIDER="${ZAI_PROVIDER:-zai}"
-ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}"
+ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/coding/paas/v4}"
 ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL:-glm-5.2}"      # 默认模型：决策/编码
 ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL:-glm-5.2}"  # 研究/综合
 DEEPSEEK_PROVIDER="${DEEPSEEK_PROVIDER:-deepseek}"

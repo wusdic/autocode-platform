@@ -17,7 +17,7 @@ _key() {  # 取 API key：先环境变量，再 ~/.hermes/.env
   [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | head -1
 }
 
-ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}"
+ZAI_BASE_URL="${ZAI_BASE_URL:-https://api.z.ai/api/coding/paas/v4}"
 ZAI_PRIMARY_MODEL="${ZAI_PRIMARY_MODEL:-glm-5.2}"
 ZAI_SECONDARY_MODEL="${ZAI_SECONDARY_MODEL:-glm-5.2}"
 DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
