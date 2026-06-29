@@ -96,7 +96,10 @@ def test_orchestrator_respects_provider_pause():
 
 def test_launcher_has_disk_hard_threshold():
     text = read("platform/launch_project.sh")
-    assert "AUTOCODE_MIN_DISK_GB" in text or "AUTOCODE_ALLOW_LOW_DISK" in text
+    assert "AUTOCODE_ALLOW_LOW_DISK" in text
+    # 阈值用 MB 粒度，默认 100MB（df -BG 无法表达百兆级）；保留 GB 兼容
+    assert "AUTOCODE_MIN_DISK_MB" in text and "df -BM" in text
+    assert 'AUTOCODE_MIN_DISK_MB:-100' in text
 
 
 def test_policy_has_taskless_fallback_switch():

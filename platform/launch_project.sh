@@ -82,13 +82,17 @@ for _tool in qa_integrity.py scope_guard.py; do
   [ -f "${PLATFORM_HOME}/${_tool}" ] && cp "${PLATFORM_HOME}/${_tool}" "${WORKSPACE}/.autocode/tools/${_tool}" 2>/dev/null || true
 done
 
-# 磁盘硬阈值（#7）：真机实测项目仅需 ~250MB、1.9GB 也能跑（Bug-2），故硬阈值取 2GB，
-# 与 monitor.sh 的 CRIT 阶梯对齐：monitor WARN<10GB（提醒）、monitor CRIT<2GB（危险）、
-# 建项目拒绝<2GB（落到危险区就不再新建）。仅本地调试可设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。
-_free_gb=$(df -BG --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
-if [ -n "${_free_gb}" ] && [ "${_free_gb}" -lt "${AUTOCODE_MIN_DISK_GB:-2}" ] \
+# 磁盘硬阈值（#7）：默认 >100MB 即可建项目（按运维要求放宽，适配磁盘紧张环境）。
+# 用 MB 粒度（df -BM）以支持百兆级阈值——df -BG 会把 100MB 向上取整成 1G，无法表达。
+# ⚠️ 真机单项目实测约需 ~250MB：阈值设到 100MB 时，100–250MB 区间仍可能在构建中途写满，
+#    仅适合试用/紧张环境；可用 AUTOCODE_MIN_DISK_MB 调整，AUTOCODE_ALLOW_LOW_DISK=1 完全跳过。
+# 兼容旧 AUTOCODE_MIN_DISK_GB：若显式设置则换算成 MB（覆盖 MB 默认值）。
+_min_mb="${AUTOCODE_MIN_DISK_MB:-100}"
+if [ -n "${AUTOCODE_MIN_DISK_GB:-}" ]; then _min_mb=$(( AUTOCODE_MIN_DISK_GB * 1024 )); fi
+_free_mb=$(df -BM --output=avail "${PLATFORM_DATA_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')
+if [ -n "${_free_mb}" ] && [ "${_free_mb}" -lt "${_min_mb}" ] \
    && [ "${AUTOCODE_ALLOW_LOW_DISK:-0}" != "1" ]; then
-  echo "❌ ${PLATFORM_DATA_ROOT} 仅剩 ${_free_gb}GB（<${AUTOCODE_MIN_DISK_GB:-2}GB），拒绝建项目。设 AUTOCODE_ALLOW_LOW_DISK=1 跳过。" >&2
+  echo "❌ ${PLATFORM_DATA_ROOT} 仅剩 ${_free_mb}MB（<${_min_mb}MB），拒绝建项目。设 AUTOCODE_ALLOW_LOW_DISK=1 跳过，或调 AUTOCODE_MIN_DISK_MB。" >&2
   exit 1
 fi
 
