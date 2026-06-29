@@ -315,10 +315,12 @@ MAX_IN_PROGRESS="${AUTOCODE_MAX_IN_PROGRESS:-3}"
 hermes config set kanban.max_in_progress "${MAX_IN_PROGRESS}"
 hermes config set kanban.failure_limit 2
 # 该项目 CEO 的 API 端口（供你的网关转发）
+# key 先存进变量：建项目末尾要用它探测 gateway 是否就绪（否则建完立刻对话会打到未起好的 CEO）。
+API_SERVER_KEY="$(openssl rand -hex 16)"
 cat >> "${HERMES_HOME}/profiles/ceo/.env" <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=${BASE_PORT}
-API_SERVER_KEY=$(openssl rand -hex 16)
+API_SERVER_KEY=${API_SERVER_KEY}
 EOF
 # 不用 `hermes -p ceo gateway install`：它的 systemd 单元名只按 profile（都叫 ceo）
 # 生成，多项目会互相覆盖。改为每项目一个唯一命名的 user 级 systemd 单元，
@@ -391,6 +393,34 @@ systemctl --user daemon-reload
 systemctl --user enable --now "${SERVICE}.service"
 # 用 `gateway run`（前台模式），故 Type=simple 正确——systemd 直接托管该前台进程。
 # （`gateway start` 需先 `gateway install` 的机器级服务，项目独立 HERMES_HOME 下不存在。）
+
+# 等 CEO gateway 真正能应答再返回。enable --now 只保证进程已 spawn，不代表已绑定端口、
+# 能应答 /v1——建项目后立刻对话会打到尚未起好的 gateway，用户感知"新建项目后没反应"。
+# 这里轮询到 gateway 对 HTTP 有响应（任意状态码，含 4xx）为止；连不上则继续等。
+GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
+echo "==> 等待 CEO gateway 就绪（最多 ${GATEWAY_READY_TIMEOUT}s）…"
+gw_ready=0
+for _i in $(seq 1 "${GATEWAY_READY_TIMEOUT}"); do
+  if "$_PYBIN" - "http://127.0.0.1:${BASE_PORT}/v1/models" "${API_SERVER_KEY}" <<'PY'
+import sys, urllib.request, urllib.error
+url, key = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
+try:
+    urllib.request.urlopen(req, timeout=2)
+except urllib.error.HTTPError:
+    pass            # 收到 HTTP 响应（含 4xx/401/404）= 服务器已起，视为就绪
+except Exception:
+    sys.exit(1)     # 连不上/超时 = 未就绪，外层继续轮询
+sys.exit(0)
+PY
+  then gw_ready=1; break; fi
+  sleep 1
+done
+if [ "${gw_ready}" = 1 ]; then
+  echo "   ✅ CEO gateway 已就绪，可立即对话。"
+else
+  echo "   ⚠️ ${GATEWAY_READY_TIMEOUT}s 内 gateway 未应答（已配 Restart=always，仍会重试）；首条消息若失败请稍候重发。" >&2
+fi
 
 echo "✅ 项目 ${PROJECT_ID} 就绪。CEO API 端口=${BASE_PORT}，HERMES_HOME=${HERMES_HOME}"
 echo "   systemd 单元=${SERVICE}.service（systemctl --user status ${SERVICE}）"

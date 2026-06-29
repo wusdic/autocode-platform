@@ -511,6 +511,19 @@ def test_kanban_subprocess_has_timeout():
 
 
 # --- 模型可用性预检：建项目前对每个 provider+model 发请求，早发现 key/模型名错 -------
+def test_launcher_waits_for_gateway_ready():
+    # 建项目要等 CEO gateway 真正能应答 /v1 再返回，否则建完立刻对话会打到未起好的
+    # gateway，用户感知"新建项目后没反应"。enable --now 只保证进程 spawn，不代表已就绪。
+    t = read("platform/launch_project.sh")
+    assert "GATEWAY_READY_TIMEOUT" in t
+    assert "/v1/models" in t and "urllib" in t          # HTTP 就绪探测
+    # 就绪等待必须在 enable --now 之后（顺序正确）
+    assert t.index("enable --now") < t.index("GATEWAY_READY_TIMEOUT")
+    # 前端建项目要有进度反馈（建项目可能近 1 分钟，不能看起来卡住）
+    html = read("platform/webui.html")
+    assert "创建项目中" in html
+
+
 def test_launcher_runs_model_preflight():
     launcher = read("platform/launch_project.sh")
     assert "AUTOCODE_MODEL_PREFLIGHT" in launcher and "check-models.sh" in launcher

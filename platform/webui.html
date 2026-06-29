@@ -402,12 +402,21 @@ async function createProject(){
   if (!state.token) { alert("请先填 token 连接"); return; }
   const id = (prompt("新建项目 ID（小写字母/数字/-/_，3–64 位）。\n一个项目对应一个核心需求；新业务用新项目：") || "").trim();
   if (!id) return;
+  // 建项目要起 Hermes 实例 + 17 角色 + 等 CEO gateway 就绪，可能耗时近 1 分钟；
+  // 给出明确进度，避免页面看起来"卡住没反应"。
+  const btn = $("#newproj"), st = $("#status");
+  btn.disabled = true;
+  const oldTxt = st.textContent, oldCls = st.className;
+  st.textContent = "创建项目中（首次启动 CEO，约需 1 分钟，请勿关闭）…"; st.className = "mut";
   try {
     await api("/api/projects", "POST", { project_id: id });
     state.pid = id;
-    await loadProjects();
+    await loadProjects();   // 成功后把状态置回"已连接"
     switchTab("chat");   // 新项目直接进对话页（统一入口，同步高亮）
-  } catch (e) { alert("创建失败：" + e.message); }
+  } catch (e) {
+    st.textContent = oldTxt; st.className = oldCls;
+    alert("创建失败：" + e.message);
+  } finally { btn.disabled = false; }
 }
 $("#newproj").onclick = createProject;
 $("#connect").onclick = () => {
