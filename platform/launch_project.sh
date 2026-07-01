@@ -423,7 +423,10 @@ systemctl --user enable --now "${SERVICE}.service"
 GATEWAY_READY_TIMEOUT="${GATEWAY_READY_TIMEOUT:-90}"
 echo "==> 等待 CEO gateway 就绪（最多 ${GATEWAY_READY_TIMEOUT}s）…"
 gw_ready=0
-for _i in $(seq 1 "${GATEWAY_READY_TIMEOUT}"); do
+# 用 SECONDS 计时的 deadline（而非固定迭代数）：每次探测 timeout=2s，若用迭代数会让
+# 总时长在"探测挂起"时逼近 3×TIMEOUT，与标称 90s 不符。deadline 把总墙钟卡在 TIMEOUT。
+_gw_deadline=$(( SECONDS + GATEWAY_READY_TIMEOUT ))
+while [ "${SECONDS}" -lt "${_gw_deadline}" ]; do
   if "$_PYBIN" - "http://127.0.0.1:${BASE_PORT}/v1/models" "${API_SERVER_KEY}" <<'PY'
 import sys, urllib.request, urllib.error
 url, key = sys.argv[1], sys.argv[2]

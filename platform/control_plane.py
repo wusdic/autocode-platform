@@ -296,13 +296,30 @@ class HermesGateway:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"hermes kanban returned non-JSON: {out.stdout[:200]!r}") from exc
 
+    @staticmethod
+    def _run_checked(cmd: list, env: dict, what: str) -> None:
+        """跑 hermes 子命令并在失败时带出真实原因（否则端点只能回一个无信息的 500）。
+
+        与 launch 同口径：捕获 stdout/stderr，非 0 时取末尾若干行抛 RuntimeError，
+        由端点（confirm-plan / change-request）转成带原因的 502，运维可诊断。
+        """
+        try:
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"{what} 失败：找不到 hermes 命令（{exc}）") from exc
+        if proc.returncode != 0:
+            lines = [l for l in ((proc.stdout or "") + (proc.stderr or "")).splitlines()
+                     if l.strip()]
+            tail = "\n".join(lines[-10:])[-1000:] or "(无输出)"
+            raise RuntimeError(f"{what} 失败（退出码 {proc.returncode}）：{tail}")
+
     def kanban_create(self, project: Project, title: str, assignee: str, *extra: str) -> None:
         env = dict(os.environ, HERMES_HOME=project.home)
         cmd = [
             "hermes", "kanban", "--board", project.project_id,
             "create", title, "--assignee", assignee, *extra,
         ]
-        subprocess.run(cmd, env=env, check=True)
+        self._run_checked(cmd, env, "创建 kanban 卡")
 
     def swarm(self, project: Project, goal: str, workers: list[str],
               verifier: str, synthesizer: str) -> None:
@@ -316,7 +333,7 @@ class HermesGateway:
         for w in workers:
             cmd += ["--worker", f"{w}:{w}"]
         cmd += ["--verifier", verifier, "--synthesizer", synthesizer]
-        subprocess.run(cmd, env=env, check=True)
+        self._run_checked(cmd, env, "启动 swarm")
 
 
 # --------------------------------------------------------------------------- #
@@ -499,13 +516,18 @@ def create_app(
         if not req_path.exists():
             raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
         # 显式编排：平台直接创建产品委员会 swarm（见手册阶段 7）。
-        gateway.swarm(
-            project,
-            goal="产出 PRD：基于 design/requirements.yaml 的 core_need",
-            workers=["pm-research-a", "pm-research-b"],
-            verifier="pm-critic",
-            synthesizer="pm-synthesizer",
-        )
+        # swarm 失败（hermes 报错/profile 缺失）要带原因回 502，而非 opaque 500；
+        # 此时 product_started 尚未落盘，重试不会重复起 swarm。
+        try:
+            gateway.swarm(
+                project,
+                goal="产出 PRD：基于 design/requirements.yaml 的 core_need",
+                workers=["pm-research-a", "pm-research-b"],
+                verifier="pm-critic",
+                synthesizer="pm-synthesizer",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(502, f"启动产品委员会失败：{exc}")
         # 落 product_started（与 orchestrator 共享 state，互相幂等去重）。
         state.update(product_started=True, stage="product")
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -542,13 +564,16 @@ def create_app(
         if state.get("arch_started"):
             return {"status": "architecture-swarm-already-started",
                     "swarm": "architecture-council"}
-        gateway.swarm(
-            project,
-            goal="产出 ADR + interface-spec + code-spec + TODO：基于 design/PRD.md",
-            workers=["arch-simple", "arch-scale", "arch-security"],
-            verifier="arch-critic",
-            synthesizer="arch-synthesizer",
-        )
+        try:
+            gateway.swarm(
+                project,
+                goal="产出 ADR + interface-spec + code-spec + TODO：基于 design/PRD.md",
+                workers=["arch-simple", "arch-scale", "arch-security"],
+                verifier="arch-critic",
+                synthesizer="arch-synthesizer",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(502, f"启动架构委员会失败：{exc}")
         # 落 arch_started，与 orchestrator.tick 幂等标记一致，互相去重。
         state.update(arch_started=True, stage="architecture")
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -561,12 +586,15 @@ def create_app(
         auth(x_token)
         project = get_project(pid)
         # 建 change-request 卡，assignee = change-guardian（先设计再执行，见阶段 10）。
-        gateway.kanban_create(
-            project,
-            f"变更请求：{body.change}",
-            "change-guardian",
-            "--goal",
-        )
+        try:
+            gateway.kanban_create(
+                project,
+                f"变更请求：{body.change}",
+                "change-guardian",
+                "--goal",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(502, f"提交变更请求失败：{exc}")
         return {"status": "change-request-created", "change": body.change}
 
     @app.get("/api/projects/{pid}/tasks")

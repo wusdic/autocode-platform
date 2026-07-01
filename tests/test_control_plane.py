@@ -1,4 +1,5 @@
 """控制平面端点测试：用注入的 FakeGateway 替换真实 Hermes 交互。"""
+import types
 import pytest
 from fastapi.testclient import TestClient
 
@@ -132,6 +133,35 @@ def test_launch_failure_surfaces_script_output(tmp_path):
     import json as _j
     ports = _j.loads((tmp_path / ".ports.json").read_text()) if (tmp_path / ".ports.json").exists() else {"assigned": {}}
     assert "proj1" not in ports.get("assigned", {})
+
+
+def test_confirm_plan_surfaces_swarm_failure(tmp_path):
+    # swarm 失败（hermes 报错/profile 缺失）必须带原因回 502，而非 opaque 500；
+    # 且 product_started 不落盘，重试不会重复起 swarm。
+    class SwarmFailGateway(FakeGateway):
+        def swarm(self, project, goal, workers, verifier, synthesizer):
+            raise RuntimeError("启动 swarm 失败（退出码 1）：profile 'pm-critic' not found")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=SwarmFailGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: x"}, headers=_h())
+    assert r.status_code == 502
+    assert "启动产品委员会失败" in r.json()["detail"] and "pm-critic" in r.json()["detail"]
+
+
+def test_change_request_surfaces_kanban_failure(tmp_path):
+    # 建 change-guardian 卡失败也要带原因回 502。
+    class CreateFailGateway(FakeGateway):
+        def kanban_create(self, project, title, assignee, *extra):
+            raise RuntimeError("创建 kanban 卡 失败（退出码 1）：board not found")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    app = cp.create_app(settings=settings, gateway=CreateFailGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.post("/api/projects/proj1/change-requests", json={"change": "加导出"}, headers=_h())
+    assert r.status_code == 502
+    assert "提交变更请求失败" in r.json()["detail"]
 
 
 def test_kanban_non_list_shape_does_not_crash(tmp_path):
@@ -345,6 +375,8 @@ def test_swarm_cmd_uses_singular_worker_flag(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None, check=False, **kw):
         calls["cmd"] = list(cmd)
+        # _run_checked 会读 returncode/stdout/stderr —— 返回一个成功的 proc 桩
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
     gw = cp.HermesGateway(cp.Settings(data_root=str(tmp_path)))
