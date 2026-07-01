@@ -434,6 +434,18 @@ def test_webui_surfaces_board_and_deliverable():
     assert "function submitChangeRequest" in html and "change-requests" in html
 
 
+def test_audit_trail_wired_end_to_end():
+    # 统一审计事件流：控制平面写关键动作/错误 + 编排器写阶段跃迁 + /audit 端点 + Web UI 事件页。
+    cp = read("platform/control_plane.py")
+    assert "audit.jsonl" in cp and "def get_audit" in cp
+    for act in ("project_created", "plan_confirmed", "change_request", "architecture_swarm"):
+        assert act in cp, act
+    orch = read("platform/orchestrator.py")
+    assert "def audit_append" in orch and "stage_transition" in orch
+    html = read("platform/webui.html")
+    assert "function renderAudit" in html and "/audit" in html and 'data-tab="audit"' in html
+
+
 def test_webui_autorefresh_is_torn_down_on_render():
     # 切 tab/换项目必须先 stopAutoRefresh，避免多个看板轮询叠加泄漏
     html = read("platform/webui.html")

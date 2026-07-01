@@ -46,6 +46,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def audit_append(ws, actor: str, action: str, detail: Optional[dict] = None,
+                 result: str = "ok") -> None:
+    """统一审计事件流：append 一条到 ``<ws>/.autocode/audit.jsonl``。
+
+    记录"何时(ts)/谁(actor)/做了什么(action)/细节(detail)/结果(result)"，让"什么时候
+    什么地方发生了什么"可一站式回溯。控制平面与编排器共用同一格式（各自写，避免耦合导入）。
+    失败即静默（审计不该影响主流程）。
+    """
+    try:
+        d = Path(ws) / ".autocode"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "audit.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": _now(), "actor": actor, "action": action,
+                                 "detail": detail or {}, "result": result},
+                                ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def _done(card: dict) -> bool:
     """卡是否完成（容忍不同字段/取值）。"""
     status = str(card.get("status", "")).lower()
@@ -218,6 +237,7 @@ class Orchestrator:
     def tick(self, project: Project) -> str:
         ws = Path(project.workspace)
         state = self._load_state(ws)
+        prev_stage = state.get("stage", "created")   # 审计：记录阶段跃迁
         cards = self._cards(project)
         paused = provider_paused(self.data_root)
         changed = False
@@ -300,7 +320,11 @@ class Orchestrator:
 
         if changed:
             self._save_state(ws, state)
-        return state.get("stage", "created")
+        new_stage = state.get("stage", "created")
+        if new_stage != prev_stage:   # 审计：阶段跃迁落 audit.jsonl（谁=编排器）
+            audit_append(ws, "orchestrator", "stage_transition",
+                         {"from": prev_stage, "to": new_stage})
+        return new_stage
 
     def tick_all(self) -> dict:
         root = Path(self.data_root)

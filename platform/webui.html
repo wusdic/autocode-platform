@@ -47,6 +47,7 @@
     <div class="tabs">
       <button data-tab="state" class="active">状态/交付</button>
       <button data-tab="board">进度看板</button>
+      <button data-tab="audit">事件</button>
       <button data-tab="artifacts">产物</button>
       <button data-tab="chat">对话</button>
     </div>
@@ -123,6 +124,8 @@ async function render(){
       await renderState(v, nav);
     } else if (state.tab === "board") {
       await renderBoard(v, nav);
+    } else if (state.tab === "audit") {
+      await renderAudit(v, nav);
     } else if (state.tab === "artifacts") {
       const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/artifacts");
       if (state._nav !== nav) return;   // 已切走：别用过期产物列表盖掉新页面
@@ -318,6 +321,42 @@ async function loadBoard(){
       box.appendChild(row);
     }
   } catch (e) { box.textContent = e.message; box.className = "err"; }
+}
+
+// 事件/审计页：一站式回溯"什么时候什么地方发生了什么"——控制平面动作 + 编排器阶段跃迁 + 错误。
+async function renderAudit(v, nav){
+  const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/audit");
+  if (nav != null && state._nav !== nav) return;   // 过期渲染丢弃
+  v.innerHTML = "";
+  const note = document.createElement("div"); note.className = "mut";
+  note.style.marginBottom = "8px";
+  note.textContent = "审计事件（最新在前）：建项目/确认需求/变更/阶段跃迁/错误。点标签重进即刷新。";
+  v.appendChild(note);
+  if (!Array.isArray(d.events) || !d.events.length){
+    const p = document.createElement("p"); p.className = "mut"; p.textContent = "（暂无事件）";
+    v.appendChild(p); return;
+  }
+  for (const e of d.events){
+    const isErr = e.result === "error" || e.action === "error";
+    const row = document.createElement("div");
+    row.style.cssText = "padding:6px 8px;border-bottom:1px solid #1a1d24";
+    const head = document.createElement("div");
+    const badge = document.createElement("span");
+    badge.textContent = e.action || "?";
+    badge.style.cssText = "font-weight:600;color:" + (isErr ? "#ff5d5d" : "#7db4ff");
+    head.appendChild(badge);
+    const who = document.createElement("span"); who.className = "mut";
+    who.style.marginLeft = "8px"; who.style.fontSize = "12px";
+    who.textContent = "@" + (e.actor || "?") + "　·　" + (e.ts || "");
+    head.appendChild(who);
+    row.appendChild(head);
+    if (e.detail && typeof e.detail === "object" && Object.keys(e.detail).length){
+      const det = document.createElement("div"); det.className = "mut"; det.style.fontSize = "12px";
+      det.textContent = JSON.stringify(e.detail);   // textContent：绝不解析
+      row.appendChild(det);
+    }
+    v.appendChild(row);
+  }
 }
 
 // 与 CEO 多轮对话：左侧选项目后，在此发需求/沟通。CEO 是唯一对话入口（设计目标）。

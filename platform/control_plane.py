@@ -439,8 +439,13 @@ def create_app(
             # 回滚端口分配，避免端口泄漏成孤儿占用（D16/D18），并回明确 502 而非泛化 500。
             ports.release(body.project_id)
             detail = exc.stderr.strip() if hasattr(exc, "stderr") and exc.stderr else str(exc)
+            # 建项目失败无 project 对象、workspace 未必存在 → 审计落服务端日志（journald 持久），
+            # 同时 502 带原因回调用方。
+            print(f"{datetime.now(timezone.utc).isoformat()} [audit] project_create_failed "
+                  f"pid={body.project_id}: {detail}", file=sys.stderr)
             raise HTTPException(502, f"failed to create project '{body.project_id}': {detail}")
         registry.add(project)
+        _audit(project, "user", "project_created", {"port": project.port})
         return {"project_id": project.project_id, "port": project.port, "status": "ready"}
 
     def _log_turn(project: Project, session_id: str, role: str, content: str) -> None:
@@ -451,6 +456,20 @@ def create_app(
             with (d / f"{session_id}.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(),
                                      "role": role, "content": content}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def _audit(project: Project, actor: str, action: str,
+               detail: Optional[dict] = None, result: str = "ok") -> None:
+        """统一审计事件流：append 到 <workspace>/.autocode/audit.jsonl（与 orchestrator.audit_append
+        同格式：ts/actor/action/detail/result）。记录关键动作与错误，供 /audit 端点与 Web UI 事件页回溯。"""
+        try:
+            d = Path(project.workspace) / ".autocode"
+            d.mkdir(parents=True, exist_ok=True)
+            with (d / "audit.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "actor": actor,
+                                     "action": action, "detail": detail or {}, "result": result},
+                                    ensure_ascii=False) + "\n")
         except OSError:
             pass
 
@@ -527,6 +546,8 @@ def create_app(
                 synthesizer="pm-synthesizer",
             )
         except RuntimeError as exc:
+            _audit(project, "system", "error",
+                   {"endpoint": "confirm-plan", "reason": str(exc)}, "error")
             raise HTTPException(502, f"启动产品委员会失败：{exc}")
         # 落 product_started（与 orchestrator 共享 state，互相幂等去重）。
         state.update(product_started=True, stage="product")
@@ -541,6 +562,7 @@ def create_app(
             "用户已确认需求双层结构，产品委员会 swarm 已启动；请跟进设计与构建直至 core_need 达成。",
             "main",
         )
+        _audit(project, "user", "plan_confirmed", {"swarm": "product-council"})
         return {"status": "plan-confirmed", "swarm": "product-council", "ceo": reply}
 
     @app.post("/api/projects/{pid}/architecture-swarm")
@@ -573,12 +595,15 @@ def create_app(
                 synthesizer="arch-synthesizer",
             )
         except RuntimeError as exc:
+            _audit(project, "system", "error",
+                   {"endpoint": "architecture-swarm", "reason": str(exc)}, "error")
             raise HTTPException(502, f"启动架构委员会失败：{exc}")
         # 落 arch_started，与 orchestrator.tick 幂等标记一致，互相去重。
         state.update(arch_started=True, stage="architecture")
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        _audit(project, "user", "architecture_swarm", {"swarm": "architecture-council"})
         return {"status": "architecture-swarm-started", "swarm": "architecture-council"}
 
     @app.post("/api/projects/{pid}/change-requests")
@@ -594,7 +619,10 @@ def create_app(
                 "--goal",
             )
         except RuntimeError as exc:
+            _audit(project, "system", "error",
+                   {"endpoint": "change-requests", "reason": str(exc)}, "error")
             raise HTTPException(502, f"提交变更请求失败：{exc}")
+        _audit(project, "user", "change_request", {"change": body.change})
         return {"status": "change-request-created", "change": body.change}
 
     @app.get("/api/projects/{pid}/tasks")
@@ -821,6 +849,27 @@ def create_app(
                     except ValueError:
                         pass
         return {"messages": msgs, "session_id": session_id}
+
+    @app.get("/api/projects/{pid}/audit")
+    def get_audit(pid: str, x_token: str = Header(None)):
+        """统一审计事件流（只读）：一站式回溯"什么时候什么地方发生了什么"。
+
+        读平台自有 <workspace>/.autocode/audit.jsonl（控制平面动作 + 编排器阶段跃迁 + 错误）。
+        按时间倒序返回，最多 500 条（避免超大响应）。
+        """
+        auth(x_token)
+        project = get_project(pid)
+        f = Path(project.workspace) / ".autocode" / "audit.jsonl"
+        events = []
+        if f.exists():
+            for line in f.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        events.append(json.loads(line))
+                    except ValueError:
+                        pass
+        return {"events": events[-500:][::-1]}   # 最新在前
 
     _SECURITY_HEADERS = {
         # 纵深防御：即便前端某处有 XSS，CSP 也限制可加载资源与可外联的域。

@@ -164,6 +164,22 @@ def test_change_request_surfaces_kanban_failure(tmp_path):
     assert "提交变更请求失败" in r.json()["detail"]
 
 
+def test_audit_trail_records_actions(client):
+    # 统一审计流：建项目/确认需求/变更都要落 audit.jsonl；/audit 最新在前返回。
+    _mk(client)   # POST /api/projects proj1 → project_created
+    client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: x"}, headers=_h())
+    client.post("/api/projects/proj1/change-requests", json={"change": "加导出"}, headers=_h())
+    r = client.get("/api/projects/proj1/audit", headers=_h())
+    assert r.status_code == 200
+    events = r.json()["events"]
+    actions = [e["action"] for e in events]
+    assert {"project_created", "plan_confirmed", "change_request"} <= set(actions)
+    # 最新在前：change_request 比 project_created 更靠前
+    assert actions.index("change_request") < actions.index("project_created")
+    # 每条含 ts/actor（可回溯"何时/谁"）
+    assert all("ts" in e and "actor" in e for e in events)
+
+
 def test_kanban_non_list_shape_does_not_crash(tmp_path):
     # 防御：即便某版本 CLI 把 list --json 返回成对象（非 list），
     # /api/projects 列表不得 500，/tasks 必须仍返回数组（前端 Array.isArray 契约）。
