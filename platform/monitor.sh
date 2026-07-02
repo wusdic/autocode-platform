@@ -20,10 +20,19 @@ ALERT_EMAIL="${ALERT_EMAIL:-}"
 DISK_MIN_GB="${DISK_MIN_GB:-10}"
 HOSTN="$(hostname)"
 
+# 审计写入器：把告警也落到对应项目 audit.jsonl（Web UI 事件页可查）；缺文件则退化为 no-op。
+# shellcheck source=/dev/null
+if ! . "$(dirname "$0")/audit_lib.sh" 2>/dev/null; then audit_event() { :; }; fi
+
 notify() {
   local level="$1" msg="$2"
   local text="[autocode-monitor][${level}][${HOSTN}] ${msg}"
   echo "$(date -Is) ${text}"
+  # 消息形如 "project <pid>: ..." 时，把告警也落到该项目 audit.jsonl（研发在事件页可回溯）。
+  # 全局告警（磁盘等无 project 前缀的）不落项目审计，仍走 journald + webhook。
+  if [[ "${msg}" =~ ^project\ ([A-Za-z0-9_-]+): ]]; then
+    audit_event "${BASH_REMATCH[1]}" monitor "alert_${level}" "${msg}"
+  fi
   if [ -n "${ALERT_WEBHOOK_URL}" ]; then
     curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
       -d "$(jq -nc --arg t "${text}" '{text:$t}')" "${ALERT_WEBHOOK_URL}" >/dev/null 2>&1 \

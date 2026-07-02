@@ -446,6 +446,22 @@ def test_audit_trail_wired_end_to_end():
     assert "function renderAudit" in html and "/audit" in html and 'data-tab="audit"' in html
 
 
+def test_ops_events_and_diagnostics_wired():
+    # watchdog/monitor 告警落 audit.jsonl（共享 audit_lib）+ 一键诊断包（脚本 + 端点 + UI 下载）。
+    lib = read("platform/audit_lib.sh")
+    assert "audit_event()" in lib and "audit.jsonl" in lib
+    wd = read("platform/watchdog.sh")
+    assert "audit_lib.sh" in wd and "audit_event " in wd
+    mon = read("platform/monitor.sh")
+    assert "audit_lib.sh" in mon and "BASH_REMATCH" in mon   # notify 从 "project <pid>:" 提取 pid
+    diag = read("platform/export-diagnostics.sh")
+    assert "诊断包" in diag and "audit.jsonl" in diag and "journalctl" in diag
+    cp = read("platform/control_plane.py")
+    assert "def diagnostics" in cp and "export-diagnostics.sh" in cp and "PlainTextResponse" in cp
+    html = read("platform/webui.html")
+    assert "function downloadDiagnostics" in html and "/diagnostics" in html
+
+
 def test_webui_autorefresh_is_torn_down_on_render():
     # 切 tab/换项目必须先 stopAutoRefresh，避免多个看板轮询叠加泄漏
     html = read("platform/webui.html")

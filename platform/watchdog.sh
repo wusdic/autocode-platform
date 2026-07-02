@@ -7,6 +7,10 @@ set -euo pipefail
 PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT:-/data/projects}"
 MAX_CONTINUATIONS="${MAX_CONTINUATIONS:-20}"   # 每项目续跑卡总上限，防永久失败任务无限续跑（#5）
 
+# 审计写入器（续跑/熔断/放行落项目 audit.jsonl，Web UI 事件页可查）；缺文件则退化为 no-op。
+# shellcheck source=/dev/null
+if ! . "$(dirname "$0")/audit_lib.sh" 2>/dev/null; then audit_event() { :; }; fi
+
 # 供应商限流暂停：monitor.sh 检测到 1305/额度耗尽时写 ${PLATFORM_DATA_ROOT}/.provider_pause
 # （内含 until-epoch）。暂停期内不再起新续跑卡，与 orchestrator.py 的 provider_paused 一致——
 # 否则限流期间狂建续跑卡只会把额度耗得更快、刷满看板。
@@ -73,6 +77,7 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
            hermes kanban --board "$pid" create "环境/挂载异常需排查：${tid}" \
              --assignee change-guardian --idempotency-key "wd-env-${tid}" \
              --body "任务 ${tid} 因环境/挂载异常 blocked（${reason}）。续跑无用，请排查 Docker 后端/跨项目挂载。" 2>/dev/null || true
+           audit_event "$pid" watchdog env_anomaly "任务 ${tid} 环境/挂载异常，建排查卡（续跑无意义）：${reason}"
            continue ;;
        esac
        title="Continue task ${tid}"
@@ -90,6 +95,7 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
              --body "Watchdog 续跑已达上限 ${MAX_CONTINUATIONS}，疑似永久失败，停止自动续跑，请人工介入。" 2>/dev/null || true
            touch "${proj_dir}workspace/.autocode/.continuation_capped"
            echo "$(date -Is) [warn] project ${pid}: 续跑达上限 ${MAX_CONTINUATIONS}，停止自动续跑（建人工 review 卡）"
+           audit_event "$pid" watchdog continuation_cap "续跑达上限 ${MAX_CONTINUATIONS}（熔断），停止自动续跑，已建人工 review 卡"
          fi
          continue
        fi
@@ -115,6 +121,7 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        fi
        hermes kanban --board "$pid" comment "$tid" "watchdog: spawned continuation ${new_tid}" || true
        echo "$(( cnt + 1 ))" > "$cnt_file"   # 续跑计数 +1（#5 熔断用）
+       audit_event "$pid" watchdog continuation "任务 ${tid} 卡住 → 建续跑卡 ${new_tid}（第 $(( cnt + 1 ))/${MAX_CONTINUATIONS} 次）"
      done
 
   # #1 可选：自动放行 dev-worker 的 review-required 自我阻断（默认关，保留人工把关）。
@@ -127,9 +134,12 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
               | .id' 2>/dev/null \
      | while read -r rid; do
          [ -z "$rid" ] && continue
-         hermes kanban --board "$pid" complete "$rid" \
-           && echo "$(date -Is) [info] project ${pid}: 自动放行 review-required 卡 ${rid}" \
-           || echo "$(date -Is) [warn] project ${pid}: 自动放行卡 ${rid} 失败"
+         if hermes kanban --board "$pid" complete "$rid"; then
+           echo "$(date -Is) [info] project ${pid}: 自动放行 review-required 卡 ${rid}"
+           audit_event "$pid" watchdog auto_approve_review "自动放行 review-required 卡 ${rid}（AUTOCODE_AUTO_APPROVE_REVIEW=1）"
+         else
+           echo "$(date -Is) [warn] project ${pid}: 自动放行卡 ${rid} 失败"
+         fi
        done
   fi
   # 正常业务编排（产品→架构→dev→QA→release）已交给 orchestrator.py 状态机；

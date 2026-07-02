@@ -30,7 +30,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 try:
@@ -870,6 +870,27 @@ def create_app(
                     except ValueError:
                         pass
         return {"events": events[-500:][::-1]}   # 最新在前
+
+    @app.get("/api/projects/{pid}/diagnostics", response_class=PlainTextResponse)
+    def diagnostics(pid: str, x_token: str = Header(None)):
+        """一键诊断包（单个文本，可直接发研发排查）：跑 export-diagnostics.sh 汇总
+        事件时间线 + 状态 + QA/发布 + 警告 + 策略降级 + 对话尾部 + 近期日志 + 环境。"""
+        auth(x_token)
+        project = get_project(pid)   # 校验存在；pid 以 argv 传入脚本，无注入
+        script = Path(settings.launcher).parent / "export-diagnostics.sh"
+        if not script.exists():
+            raise HTTPException(500, "export-diagnostics.sh 未部署")
+        try:
+            proc = subprocess.run(
+                ["bash", str(script), project.project_id],
+                capture_output=True, text=True, timeout=90,
+                env=dict(os.environ, PLATFORM_DATA_ROOT=settings.data_root),
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "诊断包生成超时（90s）")
+        body = proc.stdout or proc.stderr or "(诊断包为空)"
+        return PlainTextResponse(
+            body, headers={"Content-Disposition": f'attachment; filename="diagnostics-{pid}.txt"'})
 
     _SECURITY_HEADERS = {
         # 纵深防御：即便前端某处有 XSS，CSP 也限制可加载资源与可外联的域。

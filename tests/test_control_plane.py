@@ -180,6 +180,21 @@ def test_audit_trail_records_actions(client):
     assert all("ts" in e and "actor" in e for e in events)
 
 
+def test_diagnostics_endpoint_returns_bundle(tmp_path):
+    # /diagnostics 跑 export-diagnostics.sh，回单个文本诊断包（attachment），供研发排查。
+    import os
+    repo_launcher = os.path.join(os.path.dirname(cp.__file__), "launch_project.sh")
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path),
+                           launcher=repo_launcher)
+    app = cp.create_app(settings=settings, gateway=FakeGateway(settings))
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.get("/api/projects/proj1/diagnostics", headers=_h())
+    assert r.status_code == 200
+    assert "Autocode 诊断包" in r.text and "proj1" in r.text
+    assert r.headers.get("content-disposition", "").endswith('diagnostics-proj1.txt"')
+
+
 def test_kanban_non_list_shape_does_not_crash(tmp_path):
     # 防御：即便某版本 CLI 把 list --json 返回成对象（非 list），
     # /api/projects 列表不得 500，/tasks 必须仍返回数组（前端 Array.isArray 契约）。

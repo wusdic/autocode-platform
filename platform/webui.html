@@ -328,10 +328,15 @@ async function renderAudit(v, nav){
   const d = await api("/api/projects/" + encodeURIComponent(state.pid) + "/audit");
   if (nav != null && state._nav !== nav) return;   // 过期渲染丢弃
   v.innerHTML = "";
-  const note = document.createElement("div"); note.className = "mut";
-  note.style.marginBottom = "8px";
-  note.textContent = "审计事件（最新在前）：建项目/确认需求/变更/阶段跃迁/错误。点标签重进即刷新。";
-  v.appendChild(note);
+  const bar = document.createElement("div"); bar.className = "row"; bar.style.marginBottom = "8px";
+  const note = document.createElement("div"); note.className = "mut"; note.style.flex = "1";
+  note.textContent = "审计事件（最新在前）：动作/阶段跃迁/续跑熔断/告警/错误。点标签重进即刷新。";
+  bar.appendChild(note);
+  // 一键诊断包：下载单个文本文件，可直接发研发小组排查（汇总事件+状态+日志+环境）。
+  const dlBtn = document.createElement("button"); dlBtn.textContent = "⬇ 导出诊断包";
+  dlBtn.onclick = () => downloadDiagnostics(dlBtn);
+  bar.appendChild(dlBtn);
+  v.appendChild(bar);
   if (!Array.isArray(d.events) || !d.events.length){
     const p = document.createElement("p"); p.className = "mut"; p.textContent = "（暂无事件）";
     v.appendChild(p); return;
@@ -357,6 +362,26 @@ async function renderAudit(v, nav){
     }
     v.appendChild(row);
   }
+}
+
+// 导出诊断包：fetch（带 X-Token 头，非 URL）→ 拿纯文本 → Blob 下载。CSP connect-src 'self' 允许。
+async function downloadDiagnostics(btn){
+  const old = btn.textContent; btn.disabled = true; btn.textContent = "生成中…";
+  try {
+    const r = await fetch("/api/projects/" + encodeURIComponent(state.pid) + "/diagnostics",
+                          { headers: { "X-Token": state.token } });
+    if (!r.ok) {
+      let d = ""; try { d = (await r.json()).detail || ""; } catch (e) {}
+      throw new Error(r.status + (d ? ": " + d : ""));
+    }
+    const text = await r.text();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    a.download = "diagnostics-" + state.pid + ".txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { alert("导出失败：" + e.message); }
+  finally { btn.disabled = false; btn.textContent = old; }
 }
 
 // 与 CEO 多轮对话：左侧选项目后，在此发需求/沟通。CEO 是唯一对话入口（设计目标）。
