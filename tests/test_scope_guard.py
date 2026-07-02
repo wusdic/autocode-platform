@@ -72,3 +72,26 @@ def test_missing_allowed_paths_is_violation(tmp_path):
     res = scope_guard.scan(ws)
     assert res["scope_ok"] is False
     assert res["violations"][0]["reason"] == "no allowed_paths file"
+
+
+# --- 第十轮：主 workspace 观测（信息性，绝不阻断）------------------------------------
+def test_main_workspace_findings_observed_not_blocking(tmp_path):
+    # 主 ws 出现代码类提交 → 记入 main_workspace_findings，但 scope_ok 不受影响
+    # （阻断版曾在真机撤销：direct-to-QA 基线提交/release 合并会全量误报）。
+    ws = _project(tmp_path)   # _project 已 git init + init commit
+    (ws / "src").mkdir(exist_ok=True)
+    (ws / "src" / "sneaky.py").write_text("x=1\n")
+    _git(ws, "add", "-A"); _git(ws, "commit", "-q", "-m", "code in main ws")
+    res = scope_guard.scan(ws)
+    assert res["scope_ok"] is True                       # 不阻断
+    assert "src/sneaky.py" in res["main_workspace_findings"]   # 但可见
+
+
+def test_main_workspace_findings_ignores_docs_and_reports(tmp_path):
+    # design/reports/README 等合法产物不算 finding
+    ws = _project(tmp_path)
+    (ws / "design").mkdir(exist_ok=True); (ws / "design" / "PRD.md").write_text("p")
+    (ws / "reports" / "qa").mkdir(parents=True); (ws / "reports" / "qa" / "s.json").write_text("{}")
+    (ws / "README.md").write_text("r")
+    _git(ws, "add", "-A"); _git(ws, "commit", "-q", "-m", "docs")
+    assert scope_guard.scan(ws)["main_workspace_findings"] == []

@@ -14,6 +14,10 @@ audit_event() {
   command -v jq >/dev/null 2>&1 || return 0
   local dir="${PLATFORM_DATA_ROOT:-/data/projects}/${pid}/workspace/.autocode"
   mkdir -p "${dir}" 2>/dev/null || return 0
+  # 轮转（与 Python 侧同口径 5MB 单代）：防长期运行无界膨胀
+  local f="${dir}/audit.jsonl" sz
+  sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  [ "${sz:-0}" -gt 5000000 ] && mv -f "$f" "$f.1" 2>/dev/null
   jq -nc --arg ts "$(date -u -Is)" --arg a "${actor}" --arg ac "${action}" --arg m "${msg}" \
      '{ts:$ts, actor:$a, action:$ac, detail:{msg:$m}, result:"ok"}' \
      >> "${dir}/audit.jsonl" 2>/dev/null || true

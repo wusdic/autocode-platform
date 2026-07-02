@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import yaml
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
@@ -43,6 +44,51 @@ PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 # session_id 会进文件名（conversations/<sid>.jsonl）与 X-Hermes-Session-Key 头——必须收口，
 # 否则 "../../x" 可路径穿越写/读 workspace 外文件，含换行可注入 header。
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# requirements.yaml 的定版四键（与 SOUL.ceo 的定版四块、confirm-plan 推导提示词一致）。
+REQUIRED_REQ_KEYS = ("core_need", "extended_need", "non_goals", "acceptance_core")
+# 占位 core_need 判定：整体等于这些词才算占位（**精确匹配**，不能用子串——
+# 否则"命令行 todo 工具"这类真实需求会被 "todo" 子串误杀）；"见对话"类中文占位用子串。
+_PLACEHOLDER_EXACT = {"tbd", "todo", "placeholder", "待补充", "无", "n/a", "none"}
+_PLACEHOLDER_SUBSTR = ("见对话记录", "见对话")
+
+
+def _rotate_if_big(path: Path, max_bytes: int = 5_000_000) -> None:
+    """audit.jsonl 只增不减——超过阈值就轮转成 .1（单代保留），防长期运行无界膨胀。
+    /audit 只读当前文件尾部，轮转不影响事件页（旧事件仍在 .1 里可手工查）。失败静默。"""
+    try:
+        if path.exists() and path.stat().st_size > max_bytes:
+            path.replace(path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+
+
+def parse_requirements(text: str) -> dict:
+    """解析并校验需求 YAML（P0：拒绝占位/空 core_need，防止流水线从错误需求起跑）。
+
+    校验口径（严而不苛）：
+      * 必须是 YAML 映射；
+      * ``core_need`` 必填、非空、非占位文本（黑名单 + 过短判定）；
+      * 其余三键（extended_need/non_goals/acceptance_core）缺失时**补空列表**并继续——
+        对显式传入的最小需求（如仅 core_need）保持友好，不因结构洁癖拒掉真实需求。
+    不合法抛 ValueError（调用方转 409/422，不落盘、不起 swarm）。
+    """
+    try:
+        data = yaml.safe_load(text) if text and text.strip() else None
+    except yaml.YAMLError as exc:
+        raise ValueError(f"YAML 解析失败：{exc}")
+    if not isinstance(data, dict):
+        raise ValueError("requirements 必须是 YAML 映射（core_need/extended_need/non_goals/acceptance_core）")
+    core = str(data.get("core_need") or "").strip()
+    if not core:
+        raise ValueError("core_need 缺失或为空")
+    low = core.lower()
+    if (low in _PLACEHOLDER_EXACT or any(p in core for p in _PLACEHOLDER_SUBSTR)
+            or len(core) < 6):
+        raise ValueError(f"core_need 是占位/过短文本（'{core}'），不是可执行的定版需求")
+    for k in REQUIRED_REQ_KEYS[1:]:
+        data.setdefault(k, [])
+    return data
 
 
 def validate_project_id(pid: str) -> None:
@@ -304,7 +350,12 @@ class HermesGateway:
         由端点（confirm-plan / change-request）转成带原因的 502，运维可诊断。
         """
         try:
-            proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            # 超时兜底（第十轮）：orchestrator 内嵌 tick 会经此调 hermes——若无超时，hermes 挂起
+            # 会让 tick 线程持有 .orchestrator.lock 永不释放，此后所有 tick（timer+内嵌）静默跳过。
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                                  timeout=int(os.environ.get("HERMES_CMD_TIMEOUT", "60")))
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{what} 超时（{exc.timeout}s）：hermes 无响应") from exc
         except FileNotFoundError as exc:
             raise RuntimeError(f"{what} 失败：找不到 hermes 命令（{exc}）") from exc
         if proc.returncode != 0:
@@ -312,6 +363,22 @@ class HermesGateway:
                      if l.strip()]
             tail = "\n".join(lines[-10:])[-1000:] or "(无输出)"
             raise RuntimeError(f"{what} 失败（退出码 {proc.returncode}）：{tail}")
+
+    def cancel_card(self, project: Project, tid: str) -> bool:
+        """归档/取消一张看板卡（语义：项目 complete 后仍非 done 的卡是历史遗留噪音——
+        如被 repair 旁路 supersede 的 blocked 卡，D31）。Hermes 各版本命令不一：先试
+        archive，再回退 update --status cancelled；都失败返回 False（容忍，不阻断编排）。"""
+        env = dict(os.environ, HERMES_HOME=project.home)
+        for sub in (["archive", tid], ["update", tid, "--status", "cancelled"]):
+            try:
+                proc = subprocess.run(
+                    ["hermes", "kanban", "--board", project.project_id, *sub],
+                    env=env, capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0:
+                    return True
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+        return False
 
     def kanban_create(self, project: Project, title: str, assignee: str, *extra: str) -> None:
         env = dict(os.environ, HERMES_HOME=project.home)
@@ -466,6 +533,7 @@ def create_app(
         try:
             d = Path(project.workspace) / ".autocode"
             d.mkdir(parents=True, exist_ok=True)
+            _rotate_if_big(d / "audit.jsonl")
             with (d / "audit.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "actor": actor,
                                      "action": action, "detail": detail or {}, "result": result},
@@ -514,9 +582,28 @@ def create_app(
         design_dir = ws / "design"
         design_dir.mkdir(parents=True, exist_ok=True)
         req_path = design_dir / "requirements.yaml"
+        # P0：需求结构必须**校验通过**才落盘/起 swarm——绝不静默写占位（"core_need: 见对话记录"
+        # 会让产品委员会拿垃圾输入起跑，用户以为已确认、实则全流程从错误需求偏航）。
         if body and body.requirements:
-            req_path.write_text(body.requirements)
-        elif not req_path.exists():
+            # 显式传入（API/手册 Step 6 路径）：校验失败回 422，带具体原因。
+            try:
+                parsed = parse_requirements(body.requirements)
+            except ValueError as exc:
+                _audit(project, "system", "requirements_invalid",
+                       {"source": "explicit", "reason": str(exc)}, "error")
+                raise HTTPException(422, f"requirements 不合法：{exc}")
+            req_path.write_text(yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False))
+        elif req_path.exists():
+            # 已有落盘需求（重试/手工放置）：同样校验，占位文件不放行。
+            try:
+                parse_requirements(req_path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                _audit(project, "system", "requirements_invalid",
+                       {"source": "on-disk", "reason": str(exc)}, "error")
+                raise HTTPException(409, f"已落盘的 requirements.yaml 不合法：{exc}。"
+                                         "请与 CEO 对齐定版需求后重新确认。")
+        else:
+            # UI 只点按钮路径：从 CEO 对话推导 → 必须通过校验，否则 409（不写占位、不起 swarm）。
             text = ""
             try:
                 r = await gateway.chat(
@@ -530,8 +617,15 @@ def create_app(
                 text = ""
             m = re.search(r"```(?:ya?ml)?\s*\n(.*?)```", text, re.S)
             content = (m.group(1) if m else text).strip()
-            req_path.write_text(content
-                or "core_need: 见对话记录\nextended_need: []\nnon_goals: []\nacceptance_core: []\n")
+            try:
+                parsed = parse_requirements(content)
+            except ValueError as exc:
+                _audit(project, "system", "requirements_invalid",
+                       {"source": "ceo-derived", "reason": str(exc)}, "error")
+                raise HTTPException(409,
+                    f"需求结构未就绪：{exc}。请先在对话中让 CEO 给出【定版需求】"
+                    "（core_need/extended_need/non_goals/验收标准 四块），再点击确认。")
+            req_path.write_text(yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False))
         if not req_path.exists():
             raise HTTPException(500, "requirements.yaml 落盘失败，未启动产品委员会")
         # 显式编排：平台直接创建产品委员会 swarm（见手册阶段 7）。
@@ -719,11 +813,59 @@ def create_app(
                 if (ws / cand).exists():
                     run_command = f"see {cand}"
                     break
+        # ── 无人值守指标（第十轮）：区分"可交付"与"自然无人值守完成"。项目目标是后者——
+        # operator 手动兜底跑完的项目不该被当成 full pass。指标从 audit 事件流动态计算：
+        #   manual_interventions：operator 手动动作（architecture-swarm 手动兜底端点）；
+        #   auto_repairs：平台自愈（watchdog 续跑/熔断/放行/环境卡 + orchestrator 基线卡）。
+        manual_interventions, auto_repairs = 0, 0
+        af = ws / ".autocode" / "audit.jsonl"
+        if af.exists():
+            try:
+                for line in af.read_text(encoding="utf-8").splitlines()[-2000:]:
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    act = e.get("action", "")
+                    if act == "architecture_swarm":
+                        manual_interventions += 1
+                    elif act in ("continuation", "continuation_cap", "env_anomaly",
+                                 "auto_approve_review", "baseline_validation"):
+                        auto_repairs += 1
+            except OSError:
+                pass
+        backend_info = {}
+        bf = ws / ".autocode" / "executor_backend.json"
+        if bf.exists():
+            try:
+                backend_info = json.loads(bf.read_text())
+            except (ValueError, OSError):
+                pass
+        operator_required = None
+        orf = ws / ".autocode" / "operator_required.json"
+        if orf.exists():
+            try:
+                operator_required = json.loads(orf.read_text())
+            except (ValueError, OSError):
+                operator_required = {"kind": "unknown"}
+        degraded = bool(backend_info.get("degraded"))
+        completion_mode = state.get("completion_mode")
+        if completion_mode == "natural" and manual_interventions > 0:
+            completion_mode = "operator_assisted"   # 有手动干预就不算"自然完成"
+        is_unattended_done = bool(is_done and manual_interventions == 0
+                                  and not degraded and operator_required is None)
         return {"is_done": is_done, "stage": state.get("stage", "created"),
-                "completion_mode": state.get("completion_mode"),
+                "completion_mode": completion_mode,
                 "manifest": manifest, "run_command": run_command,
                 "release_allowed": qa.get("release_allowed") if isinstance(qa, dict) else None,
-                "integrity_ok": integrity_ok}
+                "integrity_ok": integrity_ok,
+                # 无人值守指标
+                "is_unattended_done": is_unattended_done,
+                "manual_interventions": manual_interventions,
+                "auto_repairs": auto_repairs,
+                "executor_backend": backend_info.get("backend"),
+                "degraded": degraded,
+                "operator_required": operator_required}
 
     @app.get("/api/projects/{pid}/events")
     def events(pid: str, x_token: str = Header(None)):
@@ -862,7 +1004,18 @@ def create_app(
         f = Path(project.workspace) / ".autocode" / "audit.jsonl"
         events = []
         if f.exists():
-            for line in f.read_text(encoding="utf-8").splitlines():
+            # 只读文件尾部（seek 最后 256KB）——audit.jsonl 只增不减，长期运行可达数万行，
+            # 全量 read_text 每次请求把整个文件载入内存再丢 99%（Web UI 事件页高频刷新会放大）。
+            try:
+                size = f.stat().st_size
+                with f.open("rb") as fh:
+                    if size > 262144:
+                        fh.seek(size - 262144)
+                        fh.readline()          # 丢掉可能被截断的首行
+                    tail = fh.read().decode("utf-8", errors="replace")
+            except OSError:
+                tail = ""
+            for line in tail.splitlines():
                 line = line.strip()
                 if line:
                     try:

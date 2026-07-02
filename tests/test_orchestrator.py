@@ -84,17 +84,38 @@ def test_adr_without_approved_creates_repair_card(tmp_path):
     assert any(a == "arch-synthesizer" and "补齐架构批准文件" in t for t, a, _ in gw.created)
 
 
-def test_direct_to_qa_when_no_fanout_but_source_exists(tmp_path):
-    # D30：dev-lead 卡 done、无 dev-worker 卡、但有真实源码 → 直接进 QA（不死锁）
+def test_direct_to_qa_when_no_fanout_but_source_committed(tmp_path):
+    # D30 + 第十轮收紧：dev-lead done、无 dev-worker 卡、源码落地 **且 git 有真实提交** → 进 QA。
+    # 提交判据与 min_release_ok 同口径——没有提交的散码不进 QA（防 release 前死锁）。
     gw = FakeGateway()
     project, ws, data_root = _project(tmp_path)
     for f in ("PRD.md", "ADR.md"):
         (ws / "design" / f).write_text("x")
     (ws / "design" / "approved_versions.txt").write_text("v1\n")
     _orch(data_root, gw).tick(project)   # → development
-    (ws / "src").mkdir(exist_ok=True); (ws / "src" / "main.py").write_text("print(1)\n")
+    _init_repo(ws, with_src=True)        # 源码已真实提交（baseline 已完成）
     gw.cards = [{"id": "L", "assignee": "dev-lead", "status": "done"}]
     assert _orch(data_root, gw).tick(project) == "qa"
+
+
+def test_uncommitted_source_spawns_baseline_validation_not_qa(tmp_path):
+    # 第十轮 P0：源码落地但**无真实提交** → 不进 QA；自愈建 baseline-validation 卡给
+    # dev-worker（dev-lead 无 terminal，不可能自己 commit/test——派给它必死锁）。
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    for f in ("PRD.md", "ADR.md"):
+        (ws / "design" / f).write_text("x")
+    (ws / "design" / "approved_versions.txt").write_text("v1\n")
+    _orch(data_root, gw).tick(project)   # → development
+    _init_repo(ws)                       # 仅 init 提交
+    (ws / "src").mkdir(exist_ok=True); (ws / "src" / "main.py").write_text("print(1)\n")  # 未提交
+    gw.cards = [{"id": "L", "assignee": "dev-lead", "status": "done"}]
+    stage = _orch(data_root, gw).tick(project)
+    assert stage != "qa"
+    assert any(a == "dev-worker-1" and "baseline-validation" in t for t, a, _ in gw.created)
+    n = len(gw.created)
+    _orch(data_root, gw).tick(project)   # 幂等：不重复建卡
+    assert len(gw.created) == n
 
 
 def test_direct_to_qa_blocked_when_no_source(tmp_path):
@@ -196,6 +217,51 @@ def test_qa_pass_triggers_release_then_complete(tmp_path):
     import json as _j
     st = _j.loads((ws / ".autocode" / "state.json").read_text())
     assert st.get("completion_mode") == "natural"
+
+
+def test_complete_archives_leftover_cards(tmp_path):
+    # D31（第十轮重设计）：complete 时归档所有仍非 done 的遗留卡（被 repair 旁路
+    # supersede 的 blocked 卡不再永久污染看板）。cancel 失败仅记审计、不阻断收口。
+    class ArchivingGateway(FakeGateway):
+        def __init__(self):
+            super().__init__()
+            self.cancelled = []
+        def cancel_card(self, project, tid):
+            self.cancelled.append(tid); return True
+    gw = ArchivingGateway()
+    project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)
+    (ws / "reports" / "qa").mkdir(parents=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    _orch(data_root, gw).tick(project)          # → release
+    rel = ws / "reports" / "release"; rel.mkdir(parents=True)
+    (rel / "manifest.json").write_text('{"version":"0.1.0","run_command":"python src/main.py"}')
+    gw.cards = [
+        {"id": "r1", "assignee": "release", "status": "done"},
+        {"id": "z1", "assignee": "arch-critic", "status": "blocked"},   # 被 supersede 的遗留卡
+        {"id": "z2", "assignee": "arch-synthesizer", "status": "todo"},
+    ]
+    assert _orch(data_root, gw).tick(project) == "complete"
+    assert set(gw.cancelled) == {"z1", "z2"}    # 非 done 卡全归档，done 卡不动
+    # 审计有 card_archived 事件
+    import json as _j
+    events = [_j.loads(l) for l in (ws / ".autocode" / "audit.jsonl").read_text().splitlines()]
+    assert sum(1 for e in events if e["action"] == "card_archived") == 2
+
+
+def test_complete_tolerates_gateway_without_cancel(tmp_path):
+    # FakeGateway 无 cancel_card（旧网关/降级实现）→ complete 仍正常收口，不炸
+    gw = FakeGateway()
+    project, ws, data_root = _project(tmp_path)
+    _advance_to_qa(gw, project, ws, data_root)
+    (ws / "reports" / "qa").mkdir(parents=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    _orch(data_root, gw).tick(project)
+    rel = ws / "reports" / "release"; rel.mkdir(parents=True)
+    (rel / "manifest.json").write_text('{"version":"0.1.0","run_command":"x"}')
+    gw.cards = [{"id": "r1", "assignee": "release", "status": "done"},
+                {"id": "z1", "assignee": "arch-critic", "status": "blocked"}]
+    assert _orch(data_root, gw).tick(project) == "complete"
 
 
 def test_integrity_gate_blocks_release_when_no_artifacts(tmp_path):

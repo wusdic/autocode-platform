@@ -107,13 +107,59 @@ def _changed_files(wt: Path, base_ref: str) -> list[str]:
     return sorted(f for f in files if not _is_internal(f))
 
 
+# 主 workspace 里这些文件/目录是各角色的合法产物，不列入"主 ws 出现代码"观测。
+_MAIN_WS_DOC_EXACT = {"README.md", "AGENTS.md", ".gitignore", "requirements.txt",
+                      "pyproject.toml", "Makefile"}
+_MAIN_WS_DOC_PREFIXES = ("design/", "reports/", "docs/", "dist/")
+
+
+def main_workspace_findings(ws: Path) -> list[str]:
+    """主 workspace 相对首个 commit 的代码类变更（含未提交），**仅观测、不阻断**。
+
+    为什么不并入 violations（第十轮，来自第七轮 D16 的两难）：
+      * 阻断版曾实现过并在真机撤销——direct-to-QA/baseline 流程的合法主 ws 提交、
+        release 阶段把 worktree 分支合回主线，都会让主 ws diff 出现代码 → 全量误报，
+        把合法项目堵死在 release 门（scope_guard 无法归因"这文件是谁写的"）。
+      * 但完全不看主 ws 又留下 D16 盲区（角色绕过 worktree 直接写主 ws）。
+    折中：作为**信息性发现**返回，由 qa_integrity 带进 status.json（不参与放行判定）、
+    落 audit/warnings 供人与 monitor 复核——可见而不误杀。
+    """
+    ws = Path(ws)
+    if not (ws / ".git").exists():
+        return []
+    files: set[str] = set()
+    try:
+        root = _git(ws, "rev-list", "--max-parents=0", "HEAD").splitlines()[0].strip()
+        for f in _git(ws, "diff", "--name-only", root, "HEAD").splitlines():
+            if f.strip():
+                files.add(f.strip())
+    except (subprocess.CalledProcessError, OSError, IndexError):
+        pass
+    try:  # 未提交（工作区 + 暂存）
+        for f in _git(ws, "status", "--porcelain").splitlines():
+            name = f[3:].strip() if len(f) > 3 else ""
+            if name:
+                files.add(name)
+    except (subprocess.CalledProcessError, OSError):
+        pass
+    return sorted(
+        f for f in files
+        if not _is_internal(f)
+        and f not in _MAIN_WS_DOC_EXACT
+        and not any(f.startswith(p) for p in _MAIN_WS_DOC_PREFIXES)
+    )
+
+
 def scan(ws: Path) -> dict:
-    """审计 workspace 下所有 worktree，返回 {scope_ok, violations:[...]}。"""
+    """审计 workspace 下所有 worktree，返回 {scope_ok, violations, main_workspace_findings}。
+    main_workspace_findings 仅观测（见 main_workspace_findings 的说明），不影响 scope_ok。"""
     ws = Path(ws)
     wt_root = ws / ".worktrees"
     violations: list[dict] = []
+    findings = main_workspace_findings(ws)
     if not wt_root.exists():
-        return {"scope_ok": True, "violations": []}
+        return {"scope_ok": True, "violations": [],
+                "main_workspace_findings": findings}
     base_ref = _base_ref(ws)
     for wt in sorted(p for p in wt_root.iterdir() if p.is_dir()):
         changed = _changed_files(wt, base_ref)
@@ -135,7 +181,8 @@ def scan(ws: Path) -> dict:
             violations.append({"worktree": wt.name, "task_id": tid,
                                "reason": "files outside allowed_paths",
                                "allowed_paths": allow, "files": out})
-    return {"scope_ok": not violations, "violations": violations}
+    return {"scope_ok": not violations, "violations": violations,
+            "main_workspace_findings": findings}
 
 
 def main(argv=None) -> int:

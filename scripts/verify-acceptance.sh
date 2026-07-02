@@ -84,6 +84,61 @@ else
 fi
 echo "  → ${r_gate}"
 
+echo "== 验收点 7（第十轮）：worker profile 校验（YAML 解析，不用 grep）=="
+r_worker="fail"
+_PYBIN="${PLATFORM_HOME}/venv/bin/python"; [ -x "${_PYBIN}" ] || _PYBIN="$(command -v python3)"
+_wok=1
+for _r in dev-worker-1 dev-worker-2 qa release; do
+  "${_PYBIN}" - "${p1}/.hermes/profiles/${_r}/config.yaml" "${_r}" <<'PY' || _wok=0
+import sys, yaml, pathlib
+cfg, role = sys.argv[1], sys.argv[2]
+d = yaml.safe_load(pathlib.Path(cfg).read_text()) if pathlib.Path(cfg).exists() else {}
+ts = d.get("toolsets") or []
+ok = (isinstance(ts, list) and {"kanban", "terminal", "file"}.issubset(set(ts))
+      and "execute_code" in ((d.get("agent") or {}).get("disabled_toolsets") or []))
+print(f"  {'✅' if ok else '❌'} {role}: toolsets/disabled_toolsets")
+sys.exit(0 if ok else 1)
+PY
+done
+[ "${_wok}" = 1 ] && r_worker="pass"
+echo "  → ${r_worker}"
+
+echo "== 验收点 8（第十轮）：executor 后端 / degraded / provider 状态 =="
+r_backend="manual"; r_provider="pass"
+_bj="${p1}/workspace/.autocode/executor_backend.json"
+if [ -f "${_bj}" ]; then
+  r_backend=$(jq -r '.backend + (if .degraded then " (degraded)" else "" end)' "${_bj}" 2>/dev/null || echo "?")
+fi
+if [ -f "${PLATFORM_DATA_ROOT}/.provider_billing_dead" ]; then
+  r_provider="fail"
+  echo "  ❌ 供应商余额耗尽标记存在（.provider_billing_dead）——先充值并 rm 该文件，再谈流程验收"
+fi
+echo "  backend=${r_backend} provider=${r_provider}"
+
+echo "== 验收点 9（第十轮）：交付/审计 API（需控制平面运行 + token）=="
+r_deliv="manual"; r_unattended="manual"; r_audit="manual"
+_TOKEN="${PLATFORM_TOKEN:-$(cat "${PLATFORM_HOME}/.platform_token" 2>/dev/null || true)}"
+if [ -n "${_TOKEN}" ] && curl -s -o /dev/null -m 5 "http://127.0.0.1:9000/api/projects" -H "X-Token: ${_TOKEN}"; then
+  _dl=$(curl -s -m 10 "http://127.0.0.1:9000/api/projects/${PID1}/deliverable" -H "X-Token: ${_TOKEN}" 2>/dev/null)
+  if [ -n "${_dl}" ]; then
+    [ "$(jq -r '.is_done' <<<"${_dl}" 2>/dev/null)" = "true" ] && r_deliv="pass" || r_deliv="fail"
+    # 项目目标是"自然无人值守完成"：is_done 但有人工干预/降级 → unattended fail（区分 operator-assisted）
+    [ "$(jq -r '.is_unattended_done' <<<"${_dl}" 2>/dev/null)" = "true" ] && r_unattended="pass" || r_unattended="fail"
+    echo "  deliverable: is_done=$(jq -r '.is_done' <<<"${_dl}") unattended=$(jq -r '.is_unattended_done' <<<"${_dl}") interventions=$(jq -r '.manual_interventions' <<<"${_dl}") degraded=$(jq -r '.degraded' <<<"${_dl}")"
+  fi
+  _au=$(curl -s -m 10 "http://127.0.0.1:9000/api/projects/${PID1}/audit" -H "X-Token: ${_TOKEN}" 2>/dev/null)
+  if [ -n "${_au}" ]; then
+    _acts=$(jq -r '[.events[].action] | join(",")' <<<"${_au}" 2>/dev/null || echo "")
+    case "${_acts}" in
+      *project_created*stage_transition*|*stage_transition*project_created*) r_audit="pass" ;;
+      *) r_audit="fail" ;;
+    esac
+    echo "  audit: actions 含 project_created+stage_transition → ${r_audit}"
+  fi
+else
+  echo "  控制平面不可达或无 token，标 manual（验收完整交付时应在部署机上跑）"
+fi
+
 echo "== 验收点 3 / 6：自动推进 / 跨 90 轮 =="
 echo "  这两项需观察真机长跑，无法在本脚本一次性判定，标 manual："
 echo "  - 自动推进：confirm-plan 后不人工干预，watch orchestrator.log 直到 stage=complete。"
@@ -96,18 +151,26 @@ cat <<JSON
   "isolation": "${r_isolation}",
   "docker_mount_isolation": "${r_docker}",
   "ceo_no_code": "${r_ceo}",
+  "worker_profiles": "${r_worker}",
+  "executor_backend": "${r_backend}",
+  "provider_status": "${r_provider}",
   "auto_progress": "${r_auto}",
   "parallel_no_conflict": "${r_parallel}",
   "design_gate": "${r_gate}",
+  "deliverable": "${r_deliv}",
+  "unattended_completion": "${r_unattended}",
+  "audit_trail": "${r_audit}",
   "over_90_turns": "${r_long}"
 }
 JSON
 
 # 任一确定性检查 fail → 退出码非 0，便于 CI/运维门禁串联。
-case "${r_isolation}${r_ceo}${r_parallel}${r_gate}${r_docker}" in
-  passpasspasspassmanual|passpasspasspasspass) exit 0 ;;
-esac
-case "${r_isolation}${r_ceo}${r_parallel}${r_gate}" in
-  passpasspasspass) exit 0 ;;
-  *) exit 1 ;;
-esac
+# （deliverable/unattended/audit 为 manual 时不拦：项目未跑完时也能做部署面验收。）
+for _v in "${r_isolation}" "${r_ceo}" "${r_parallel}" "${r_gate}" "${r_worker}" "${r_provider}"; do
+  [ "${_v}" = "fail" ] && exit 1
+done
+[ "${r_docker}" = "fail" ] && exit 1
+[ "${r_deliv}" = "fail" ] && exit 1
+[ "${r_unattended}" = "fail" ] && exit 1
+[ "${r_audit}" = "fail" ] && exit 1
+exit 0

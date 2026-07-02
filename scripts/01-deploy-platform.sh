@@ -52,7 +52,7 @@ elif ! docker info >/dev/null 2>&1; then
   echo "❌ 当前用户无法访问 Docker。请执行 'newgrp docker' 或重新登录使组权限生效；" >&2
   echo "   不要用 'chmod 666 /var/run/docker.sock'（Docker root 权限暴露给全机用户）。" >&2
   [ "${ALLOW_PUBLIC_SANDBOX_FALLBACK:-0}" = "1" ] || exit 1
-elif ! docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
+elif ! docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" --build-arg APT_MIRROR="${APT_MIRROR:-}" \
        -t "${SANDBOX_IMAGE}" \
        -f "${REPO_ROOT}/docker/python-sandbox.Dockerfile" "${REPO_ROOT}"; then
   echo "❌ 沙箱镜像构建失败。修复 Docker 后重试；仅本地调试可设 ALLOW_PUBLIC_SANDBOX_FALLBACK=1。" >&2
@@ -143,6 +143,8 @@ EnvironmentFile=-${PLATFORM_HOME}/.platform_runtime.env
 Environment=XDG_RUNTIME_DIR=%t
 Environment=PATH=${HERMES_BIN_DIR}:${PLATFORM_HOME}/venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=${exec_cmd}
+RuntimeMaxSec=600
+TimeoutStopSec=15
 SVC
   cat > "${UNIT_DIR}/${name}.timer" <<TMR
 [Unit]

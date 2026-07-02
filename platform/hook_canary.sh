@@ -45,11 +45,17 @@ tid=$(hermes kanban --board "${PID}" create "HOOK CANARY ${TS} (expected BLOCKED
 
 sleep "${CANARY_WAIT}"
 
+# 审计写入器（结果落项目 audit.jsonl，Web UI 事件页可查）；缺文件则退化为 no-op。
+# shellcheck source=/dev/null
+if ! . "$(dirname "$0")/audit_lib.sh" 2>/dev/null; then audit_event() { :; }; fi
+
 if [ -f "${SENTINEL}" ]; then
   notify CRIT "project ${PID}: 设计闸门未生效！dev-worker 在无 approved design 下写成功 ${REL}（pre_tool_call hook 失效，参见 issue #25204）"
+  audit_event "${PID}" monitor hook_canary_failed "设计闸门未生效：无 approved design 仍写出 ${REL}（hook 失效，第二层闸门缺位）"
   rm -f "${SENTINEL}"
 else
   echo "$(date -Is) [ok] project ${PID}: hook canary 通过（未出现哨兵文件）"
+  audit_event "${PID}" monitor hook_canary_ok "hook 金丝雀通过（未出现哨兵文件）"
 fi
 
 [ -n "${tid:-}" ] && hermes kanban --board "${PID}" comment "${tid}" "canary done" >/dev/null 2>&1 || true

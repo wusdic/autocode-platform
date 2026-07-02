@@ -7,13 +7,20 @@ FROM python:3.11-slim
 
 ARG UID=1000
 ARG GID=1000
+# 国内网络 deb.debian.org 常不可达导致构建失败（真机 D12 高频）。默认**不改源**；
+# 国内构建时传：--build-arg APT_MIRROR=mirrors.aliyun.com（deploy 脚本透传 APT_MIRROR 环境变量）。
+ARG APT_MIRROR=""
 
 # 必须在切到非 root USER 之前装系统包（USER 后无 root 权限）。
 # git：dev-worker 的 worktree 工作区模式依赖它（worktree add / branch / commit / merge）。
 #      不装则 worktree 失效 → 并行任务在同一 workspace 互相覆盖、交付不可追溯（真机 P0）。
 # ca-certificates：git over https / pip 校验证书所需。
 # --no-install-recommends 控制镜像体积（slim 基础上只增几 MB）。
-RUN apt-get update \
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/*.sources 2>/dev/null \
+      || sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 

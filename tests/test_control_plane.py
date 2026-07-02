@@ -24,7 +24,14 @@ class FakeGateway:
         )
 
     async def chat(self, project, message, session_id):
-        return {"role": "assistant", "content": f"[{project.project_id}] echo: {message}"}
+        # confirm-plan 的推导路径会请 CEO 输出定版 yaml 代码块；桩按真实 CEO 行为返回
+        # OpenAI 形状 + 合法 yaml（core_need 非占位），让"只点按钮"路径走通并被校验。
+        if "yaml 代码块" in message:
+            content = ("```yaml\ncore_need: 命令行待办工具，增删查改，本地文件存储\n"
+                       "extended_need: []\nnon_goals: []\nacceptance_core: []\n```")
+        else:
+            content = f"[{project.project_id}] echo: {message}"
+        return {"choices": [{"message": {"content": content}}]}
 
     def kanban(self, project, *args):
         return [{"id": "t1", "title": "demo", "status": "ready"}]
@@ -145,7 +152,7 @@ def test_confirm_plan_surfaces_swarm_failure(tmp_path):
     app = cp.create_app(settings=settings, gateway=SwarmFailGateway(settings))
     c = TestClient(app)
     c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
-    r = c.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: x"}, headers=_h())
+    r = c.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: 命令行待办工具，增删查改"}, headers=_h())
     assert r.status_code == 502
     assert "启动产品委员会失败" in r.json()["detail"] and "pm-critic" in r.json()["detail"]
 
@@ -167,7 +174,7 @@ def test_change_request_surfaces_kanban_failure(tmp_path):
 def test_audit_trail_records_actions(client):
     # 统一审计流：建项目/确认需求/变更都要落 audit.jsonl；/audit 最新在前返回。
     _mk(client)   # POST /api/projects proj1 → project_created
-    client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: x"}, headers=_h())
+    client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core_need: 命令行待办工具，增删查改"}, headers=_h())
     client.post("/api/projects/proj1/change-requests", json={"change": "加导出"}, headers=_h())
     r = client.get("/api/projects/proj1/audit", headers=_h())
     assert r.status_code == 200
@@ -230,12 +237,90 @@ def test_confirm_plan_without_requirements_persists_file(client):
 
 def test_confirm_plan_idempotent(client):
     _mk(client)
-    r1 = client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core: x"}, headers=_h())
+    req = {"requirements": "core_need: 命令行待办工具，增删查改"}
+    r1 = client.post("/api/projects/proj1/confirm-plan", json=req, headers=_h())
     assert r1.status_code == 200 and r1.json()["status"] == "plan-confirmed"
     n = len(client.gateway.swarms)
-    r2 = client.post("/api/projects/proj1/confirm-plan", json={"requirements": "core: x"}, headers=_h())
+    r2 = client.post("/api/projects/proj1/confirm-plan", json=req, headers=_h())
     assert r2.json()["status"] == "already-started"
     assert len(client.gateway.swarms) == n   # 不重复起产品委员会
+
+
+# --- 第十轮 P0：需求校验——占位/垃圾输入不落盘、不起 swarm --------------------------
+def test_confirm_plan_rejects_placeholder_requirements(client):
+    ws = _mk(client)
+    r = client.post("/api/projects/proj1/confirm-plan",
+                    json={"requirements": "core_need: 见对话记录\nextended_need: []\n"},
+                    headers=_h())
+    assert r.status_code == 422 and "core_need" in r.json()["detail"]
+    assert not (ws / "design" / "requirements.yaml").exists()   # 不落占位盘
+    assert len(client.gateway.swarms) == 0                       # 不起 swarm
+
+
+def test_confirm_plan_rejects_when_ceo_cannot_produce_yaml(tmp_path):
+    # UI 只点按钮 + CEO 给不出 yaml（跑题/网关空回）→ 409，不写占位、不起 swarm
+    class VagueCEOGateway(FakeGateway):
+        async def chat(self, project, message, session_id):
+            return {"choices": [{"message": {"content": "我们再聊聊吧，需求还不清楚。"}}]}
+    settings = cp.Settings(token=TOKEN, base_port=9000, data_root=str(tmp_path))
+    gw = VagueCEOGateway(settings)
+    app = cp.create_app(settings=settings, gateway=gw)
+    c = TestClient(app)
+    c.post("/api/projects", json={"project_id": "proj1"}, headers=_h())
+    r = c.post("/api/projects/proj1/confirm-plan", json={}, headers=_h())
+    assert r.status_code == 409 and "定版需求" in r.json()["detail"]
+    from pathlib import Path
+    assert not (Path(str(tmp_path)) / "proj1" / "workspace" / "design" / "requirements.yaml").exists()
+    assert len(gw.swarms) == 0
+
+
+def test_deliverable_unattended_metrics(client):
+    # 第十轮：/deliverable 区分"可交付"与"自然无人值守完成"。
+    # 手动调 architecture-swarm（operator 兜底端点）→ manual_interventions+1 →
+    # 即便最终 is_done，也不算 unattended，completion_mode 转 operator_assisted。
+    ws = _mk(client)
+    client.post("/api/projects/proj1/architecture-swarm", headers=_h())   # 手动干预
+    import json as _j
+    (ws / ".autocode").mkdir(parents=True, exist_ok=True)
+    (ws / ".autocode" / "state.json").write_text(
+        _j.dumps({"stage": "complete", "completion_mode": "natural"}))
+    (ws / "reports" / "release").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "release" / "manifest.json").write_text('{"run_command":"python x"}')
+    (ws / "reports" / "qa").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    d = client.get("/api/projects/proj1/deliverable", headers=_h()).json()
+    assert d["is_done"] is True
+    assert d["manual_interventions"] >= 1
+    assert d["is_unattended_done"] is False              # 有人工干预 ≠ 自然完成
+    assert d["completion_mode"] == "operator_assisted"   # natural 被干预覆盖
+    for k in ("auto_repairs", "executor_backend", "degraded", "operator_required"):
+        assert k in d, k
+
+
+def test_deliverable_natural_when_no_intervention(client):
+    ws = _mk(client)
+    import json as _j
+    (ws / ".autocode").mkdir(parents=True, exist_ok=True)
+    (ws / ".autocode" / "state.json").write_text(
+        _j.dumps({"stage": "complete", "completion_mode": "natural"}))
+    (ws / "reports" / "release").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "release" / "manifest.json").write_text('{"run_command":"python x"}')
+    (ws / "reports" / "qa").mkdir(parents=True, exist_ok=True)
+    (ws / "reports" / "qa" / "status.json").write_text('{"release_allowed": true}')
+    d = client.get("/api/projects/proj1/deliverable", headers=_h()).json()
+    assert d["is_done"] is True and d["is_unattended_done"] is True
+    assert d["completion_mode"] == "natural" and d["manual_interventions"] == 0
+
+
+def test_parse_requirements_accepts_todo_app():
+    # 回归：黑名单必须精确匹配——"命令行 todo 工具"是真实需求，不能被 "todo" 子串误杀
+    parsed = cp.parse_requirements("core_need: build a CLI todo app\n")
+    assert parsed["core_need"] == "build a CLI todo app"
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        cp.parse_requirements("core_need: TODO\n")      # 整体占位仍拒
+    with _pt.raises(ValueError):
+        cp.parse_requirements("core_need: 见对话记录\n")
 
 
 def test_deliverable_not_done_without_manifest(client):
@@ -434,7 +519,8 @@ def test_message_ceo_roundtrip(client):
     r = client.post("/api/projects/proj1/messages",
                     json={"message": "hello"}, headers=_h())
     assert r.status_code == 200
-    assert "echo: hello" in r.json()["content"]
+    # FakeGateway 现按真实 Hermes/OpenAI 形状返回（choices[0].message.content）
+    assert "echo: hello" in r.json()["choices"][0]["message"]["content"]
 
 
 def test_list_tasks(client):

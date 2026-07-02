@@ -57,7 +57,13 @@ def audit_append(ws, actor: str, action: str, detail: Optional[dict] = None,
     try:
         d = Path(ws) / ".autocode"
         d.mkdir(parents=True, exist_ok=True)
-        with (d / "audit.jsonl").open("a", encoding="utf-8") as fh:
+        f = d / "audit.jsonl"
+        try:  # 轮转（与 control_plane._rotate_if_big 同口径 5MB 单代）：防长期运行无界膨胀
+            if f.exists() and f.stat().st_size > 5_000_000:
+                f.replace(f.with_name(f.name + ".1"))
+        except OSError:
+            pass
+        with f.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": _now(), "actor": actor, "action": action,
                                  "detail": detail or {}, "result": result},
                                 ensure_ascii=False) + "\n")
@@ -221,12 +227,19 @@ class Orchestrator:
     def _dev_complete(cards: list, ws: Path) -> bool:
         """dev 是否完成。正常路径：dev-worker fan-out 卡全 done。direct-to-QA 路径（D30，
         真机 demo1：dev-lead 串行直接交付、无 fan-out 卡）：无 dev-worker 卡但 dev-lead 卡已 done
-        且**已有真实源码落地**——避免状态机在 dev→qa 死锁，又靠产物校验防"空手放行"。"""
+        且**已有真实源码落地 + git 有真实提交**。
+
+        为什么加提交判据（第十轮 P0）：dev-lead 是 no-code 角色（无 terminal），不可能自己
+        commit/test；若只看"文件存在"就进 QA，未提交的散码会在 release 前被 min_release_ok
+        的提交硬闸拦下，而修复卡又派给不能 commit 的 dev-lead → 死锁。提交判据与
+        min_release_ok 同口径（commit_count_all>1），把"进 QA"与"能 release"对齐；
+        未提交的场景由 tick 的 baseline-validation 自愈建卡交给**能** commit 的 dev-worker。"""
         dev = [c for c in cards if str(c.get("assignee", "")).startswith("dev-worker")]
         if dev:
             return all(_done(c) for c in dev)
         lead_done = any(_done(c) and str(c.get("assignee", "")) == "dev-lead" for c in cards)
-        return lead_done and qa_integrity.expected_files_present(ws)
+        return (lead_done and qa_integrity.expected_files_present(ws)
+                and qa_integrity.commit_count_all(ws) > 1)
 
     @staticmethod
     def _release_done(cards: list) -> bool:
@@ -266,6 +279,24 @@ class Orchestrator:
                 "design/approved_versions.txt（每行一个已批准版本号）",
                 "arch-synthesizer", "--goal")
             state.update(approval_repair_started=True); changed = True
+
+        # 2c) 自愈（第十轮 P0）：direct-to-QA 场景下源码落地但**无真实提交**——dev-lead 无 terminal
+        #     不能 commit/test，若不介入会卡死在 dev→qa（_dev_complete 的提交判据不满足）。
+        #     建一张 baseline-validation 卡交给**能** commit 的 dev-worker（幂等）。
+        if state.get("dev_started") and not state.get("qa_started") \
+                and not state.get("baseline_validation_started") and not paused:
+            dev_cards = [c for c in cards if str(c.get("assignee", "")).startswith("dev-worker")]
+            lead_done = any(_done(c) and str(c.get("assignee", "")) == "dev-lead" for c in cards)
+            if (not dev_cards and lead_done
+                    and qa_integrity.expected_files_present(ws)
+                    and qa_integrity.commit_count_all(ws) <= 1):
+                self.gw.kanban_create(
+                    project,
+                    "baseline-validation：核对已有实现是否匹配 ADR/TODO，跑测试，git commit 为基线",
+                    "dev-worker-1", "--goal")
+                state.update(baseline_validation_started=True); changed = True
+                audit_append(ws, "orchestrator", "baseline_validation",
+                             {"reason": "源码落地但无真实提交；dev-lead 无 terminal，建 dev-worker 基线卡"})
 
         # 3) dev 完成（fan-out 卡全 done，或 direct-to-QA 路径）→ 起 QA（限流暂停期不起）
         if state.get("dev_started") and self._dev_complete(cards, ws) \
@@ -310,6 +341,24 @@ class Orchestrator:
         if state.get("release_started") and self._release_done(cards) and state.get("stage") != "complete":
             if self._release_manifest_ok(ws):
                 state.update(stage="complete", completion_mode="natural"); changed = True
+                # D31（第十轮重设计）：complete 后归档所有仍非 done 的遗留卡——被 repair
+                # 旁路 supersede 的 blocked 卡会永久停留、污染看板统计与 Web UI 进度。
+                # 在 complete 时点归档是**确定性**判据（项目已交付，非 done 卡定属噪音），
+                # 比"猜哪张卡被谁 supersede"可靠。cancel_card 失败仅记审计（不阻断收口）。
+                cancel = getattr(self.gw, "cancel_card", None)
+                if cancel is not None:
+                    for c in cards:
+                        if not _done(c) and c.get("id"):
+                            ok = False
+                            try:
+                                ok = bool(cancel(project, str(c["id"])))
+                            except Exception:
+                                ok = False
+                            audit_append(ws, "orchestrator", "card_archived",
+                                         {"task_id": c.get("id"),
+                                          "title": str(c.get("title", ""))[:80],
+                                          "status": c.get("status")},
+                                         "ok" if ok else "error")
             elif not state.get("manifest_repair_started"):
                 self.gw.kanban_create(
                     project,

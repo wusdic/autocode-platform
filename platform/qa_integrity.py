@@ -102,6 +102,17 @@ def scope_violations(ws: Path) -> list:
         return []
 
 
+def main_workspace_findings(ws: Path) -> list:
+    """主 workspace 代码类变更观测（**信息性，不参与放行判定**——见 scope_guard 同名函数
+    的两难说明：阻断版会误杀 direct-to-QA/release 合并等合法主 ws 提交，观测版保留 D16 可见性）。"""
+    if scope_guard is None:
+        return []
+    try:
+        return scope_guard.main_workspace_findings(ws)
+    except Exception:
+        return []
+
+
 def compute(ws: Path) -> dict:
     """生成 integrity 块，供 QA 合并进 reports/qa/status.json。"""
     return {
@@ -111,6 +122,8 @@ def compute(ws: Path) -> dict:
         "expected_files_present": expected_files_present(ws),
         "todo_markers": scan_todo_markers(ws),
         "scope_violations": scope_violations(ws),
+        # 信息性字段：integrity_block_ok/policy 均不检查它（观测不阻断）
+        "main_workspace_findings": main_workspace_findings(ws),
     }
 
 

@@ -72,12 +72,19 @@ for proj_dir in "${PLATFORM_DATA_ROOT}"/*/; do
        case "$reason" in
          *insufficient\ balance*|*1113*|*billing*|*no\ resource\ package*|*余额*)
            continue ;;  # 供应商余额耗尽：靠 monitor 的 .provider_billing_dead + 充值，续跑无意义
-         *environment*|*mount*|*wrong\ workspace*|*foreign\ workspace*)
-           # 环境/挂载错误：续跑必再失败 → 建一张排查卡（幂等）交人工/触发 docker guard，不盲目续跑
+         *environment*|*mount*|*wrong\ workspace*|*foreign\ workspace*|*docker*|*daemon*|*permission\ denied*|*cwd\ outside*)
+           # 环境/挂载/Docker 后端错误（第十轮扩词：daemon 连不上/权限/挂载命名空间等真机高频文本）：
+           # 续跑必再失败 → 建排查卡（幂等）+ 写 operator_required 标记（agent 修不了 docker 组/
+           # systemd/余额这类宿主问题，必须 operator 出手；UI 状态页据此显示醒目提示）。
            hermes kanban --board "$pid" create "环境/挂载异常需排查：${tid}" \
              --assignee change-guardian --idempotency-key "wd-env-${tid}" \
              --body "任务 ${tid} 因环境/挂载异常 blocked（${reason}）。续跑无用，请排查 Docker 后端/跨项目挂载。" 2>/dev/null || true
-           audit_event "$pid" watchdog env_anomaly "任务 ${tid} 环境/挂载异常，建排查卡（续跑无意义）：${reason}"
+           command -v jq >/dev/null 2>&1 && jq -nc \
+             --arg k "executor_environment" --arg t "$tid" --arg r "$reason" \
+             --arg s "检查 docker 组 / user systemd / SupplementaryGroups；修复后 rm 本文件" \
+             '{kind:$k, task_id:$t, reason:$r, suggested_action:$s}' \
+             > "${proj_dir}workspace/.autocode/operator_required.json" 2>/dev/null || true
+           audit_event "$pid" watchdog env_anomaly "任务 ${tid} 环境/挂载异常，建排查卡+operator_required（续跑无意义）：${reason}"
            continue ;;
        esac
        title="Continue task ${tid}"

@@ -179,10 +179,28 @@ for r in pm-lead pm-critic arch-lead arch-critic change-guardian dev-lead \
   hermes -p "$r" config set agent.disabled_toolsets '["code_execution","execute_code","terminal"]'
 done
 # 工程师/质控：Docker backend + worktree（真沙箱），只挂本项目 workspace
+# D26：executor 后端选择。Docker 是生产默认（隔离安全模型依赖它）；但真机暴露 systemd user service
+# 子进程（worker）常因 docker 组未透传而 daemon 不可用 → worker 全卡死。根治见下方 SupplementaryGroups；
+# 这里再加一层：建项目时探测运行上下文能否用 docker，不行则【拒绝】建项目（除非显式允许降级 local）。
+# ⚠️ 顺序关键（第十轮 P0）：后端选择必须在沙箱镜像检查**之前**——否则显式 local 降级
+# （AUTOCODE_EXECUTOR_BACKEND=local + AUTOCODE_ALLOW_LOCAL_EXECUTOR=1）会被镜像检查提前挡死，
+# 降级开关名存实亡（local 后端根本不需要沙箱镜像）。
+AUTOCODE_EXECUTOR_BACKEND="${AUTOCODE_EXECUTOR_BACKEND:-auto}"   # auto|docker|local
+AUTOCODE_ALLOW_LOCAL_EXECUTOR="${AUTOCODE_ALLOW_LOCAL_EXECUTOR:-0}"
+_docker_runnable() { command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; }
+case "${AUTOCODE_EXECUTOR_BACKEND}" in
+  docker) _docker_runnable || { echo "❌ 要求 docker 后端但当前上下文 docker 不可用（重登/重启 user@uid 让 docker 组生效）。" >&2; exit 1; }; EXECUTOR_BACKEND=docker ;;
+  local)  [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ] || { echo "❌ local 后端削弱隔离（在宿主跑代码）。确需降级请设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1。" >&2; exit 1; }; EXECUTOR_BACKEND=local ;;
+  auto)   if _docker_runnable; then EXECUTOR_BACKEND=docker;
+          elif [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ]; then EXECUTOR_BACKEND=local;
+               echo "⚠️ docker 当前上下文不可用，按显式允许降级 local（爆炸半径=宿主，仅开发调试）。" >&2;
+          else echo "❌ docker 当前上下文不可用且未允许 local 降级，拒绝建项目。修复：重登或 'sudo systemctl restart user@\$(id -u)' 让 docker 组生效；或设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1 降级。" >&2; exit 1; fi ;;
+  *) echo "❌ 无效 AUTOCODE_EXECUTOR_BACKEND=${AUTOCODE_EXECUTOR_BACKEND}" >&2; exit 1 ;;
+esac
 # 沙箱镜像：用部署时构建的非 root 镜像（映射宿主 UID，产物属主正确）。
-# 安全模型依赖它——不静默回退公共 root 镜像（破坏隔离/属主/可复现）。
+# 安全模型依赖它——不静默回退公共 root 镜像（破坏隔离/属主/可复现）。仅 docker 后端需要。
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-autocode-python:3.11-local}"
-if ! docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1; then
+if [ "${EXECUTOR_BACKEND}" = "docker" ] && ! docker image inspect "${SANDBOX_IMAGE}" >/dev/null 2>&1; then
   if [ "${ALLOW_PUBLIC_SANDBOX_FALLBACK:-0}" = "1" ]; then
     echo "⚠️ 沙箱镜像 ${SANDBOX_IMAGE} 不存在，开发模式回退 python:3.11-slim（爆炸半径/属主不达标）" >&2
     SANDBOX_IMAGE="python:3.11-slim"
@@ -223,22 +241,7 @@ t["backend"] = "local"; t.pop("docker_image", None); t.pop("docker_volumes", Non
 p.write_text(yaml.safe_dump(d, default_flow_style=False, allow_unicode=True, sort_keys=False))
 PY
 }
-# D26：executor 后端选择。Docker 是生产默认（隔离安全模型依赖它）；但真机暴露 systemd user service
-# 子进程（worker）常因 docker 组未透传而 daemon 不可用 → worker 全卡死。根治见下方 SupplementaryGroups；
-# 这里再加一层：建项目时探测运行上下文能否用 docker，不行则【拒绝】建项目（除非显式允许降级 local）。
-AUTOCODE_EXECUTOR_BACKEND="${AUTOCODE_EXECUTOR_BACKEND:-auto}"   # auto|docker|local
-AUTOCODE_ALLOW_LOCAL_EXECUTOR="${AUTOCODE_ALLOW_LOCAL_EXECUTOR:-0}"
-_docker_runnable() { command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; }
-case "${AUTOCODE_EXECUTOR_BACKEND}" in
-  docker) _docker_runnable || { echo "❌ 要求 docker 后端但当前上下文 docker 不可用（重登/重启 user@uid 让 docker 组生效）。" >&2; exit 1; }; EXECUTOR_BACKEND=docker ;;
-  local)  [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ] || { echo "❌ local 后端削弱隔离（在宿主跑代码）。确需降级请设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1。" >&2; exit 1; }; EXECUTOR_BACKEND=local ;;
-  auto)   if _docker_runnable; then EXECUTOR_BACKEND=docker;
-          elif [ "${AUTOCODE_ALLOW_LOCAL_EXECUTOR}" = "1" ]; then EXECUTOR_BACKEND=local;
-               echo "⚠️ docker 当前上下文不可用，按显式允许降级 local（爆炸半径=宿主，仅开发调试）。" >&2;
-          else echo "❌ docker 当前上下文不可用且未允许 local 降级，拒绝建项目。修复：重登或 'sudo systemctl restart user@\$(id -u)' 让 docker 组生效；或设 AUTOCODE_ALLOW_LOCAL_EXECUTOR=1 降级。" >&2; exit 1; fi ;;
-  *) echo "❌ 无效 AUTOCODE_EXECUTOR_BACKEND=${AUTOCODE_EXECUTOR_BACKEND}" >&2; exit 1 ;;
-esac
-# 运行时标记，供 /state、/deliverable、验收展示。
+# 运行时标记，供 /state、/deliverable、验收展示。（后端选择已上移到镜像检查前，见上方 D26 块。）
 mkdir -p "${WORKSPACE}/.autocode"
 "$_PYBIN" - "${WORKSPACE}/.autocode/executor_backend.json" "${EXECUTOR_BACKEND}" <<'PY'
 import sys, json, pathlib
@@ -446,6 +449,17 @@ if [ "${gw_ready}" = 1 ]; then
   echo "   ✅ CEO gateway 已就绪，可立即对话。"
 else
   echo "   ⚠️ ${GATEWAY_READY_TIMEOUT}s 内 gateway 未应答（已配 Restart=always，仍会重试）；首条消息若失败请稍候重发。" >&2
+fi
+
+# 可选（第十轮）：建项目后**后台**跑一次 hook 金丝雀，尽早发现"第二层设计闸门失效"
+# （否则要等每小时 cron 才发现，期间 worker 可能越权写码）。默认关——它是重探针：
+# 真实 spawn 一个 worker（耗 token、等 ~3 分钟）、还会在全新看板上留一张探针卡。
+# 设 AUTOCODE_LAUNCH_CANARY=1 开启；后台执行不阻塞建项目返回，结果落项目事件页（audit）。
+if [ "${AUTOCODE_LAUNCH_CANARY:-0}" = "1" ] && [ -x "${PLATFORM_HOME}/hook_canary.sh" ]; then
+  echo "==> 后台启动 hook 金丝雀（AUTOCODE_LAUNCH_CANARY=1；结果见项目【事件】页）"
+  nohup env PLATFORM_DATA_ROOT="${PLATFORM_DATA_ROOT}" \
+    bash "${PLATFORM_HOME}/hook_canary.sh" "${PROJECT_ID}" \
+    >> "${PLATFORM_HOME}/monitor.log" 2>&1 &
 fi
 
 echo "✅ 项目 ${PROJECT_ID} 就绪。CEO API 端口=${BASE_PORT}，HERMES_HOME=${HERMES_HOME}"

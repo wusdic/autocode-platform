@@ -215,7 +215,9 @@ async function renderState(v, nav){
     card.style.cssText = "margin:14px 0;padding:12px;border-radius:8px;border:1px solid "
       + (dl.is_done ? "#3ecf8e" : "#2a2f3a") + ";background:#0b0d12";
     const badge = document.createElement("div");
-    badge.textContent = dl.is_done ? "✅ 已交付（可运行）" : "⏳ 进行中 / 尚未通过交付门";
+    badge.textContent = dl.is_done
+      ? (dl.is_unattended_done ? "✅ 已交付（自然无人值守完成）" : "✅ 已交付（含人工/降级辅助）")
+      : "⏳ 进行中 / 尚未通过交付门";
     badge.style.cssText = "font-weight:600;color:" + (dl.is_done ? "#3ecf8e" : "#e6e6e6");
     card.appendChild(badge);
     const meta = document.createElement("div"); meta.className = "mut";
@@ -225,6 +227,24 @@ async function renderState(v, nav){
       + "　·　完整性：" + fmtBool(dl.integrity_ok)
       + (dl.completion_mode ? "　·　完成方式：" + dl.completion_mode : "");
     card.appendChild(meta);
+    // 运行模式行：executor 后端 / 是否降级 / 人工干预与自愈次数——判断"是否真·无人值守"的依据
+    const meta2 = document.createElement("div"); meta2.className = "mut";
+    meta2.style.marginTop = "2px"; meta2.style.fontSize = "12px";
+    meta2.textContent = "后端：" + (dl.executor_backend || "?")
+      + (dl.degraded ? "（degraded，隔离减弱）" : "")
+      + "　·　人工干预：" + (dl.manual_interventions ?? "—")
+      + "　·　自愈动作：" + (dl.auto_repairs ?? "—");
+    if (dl.degraded) meta2.style.color = "#ffb86c";
+    card.appendChild(meta2);
+    // operator_required：agent 修不了的宿主问题（docker 组/余额/systemd），必须 operator 出手
+    if (dl.operator_required) {
+      const opw = document.createElement("div");
+      opw.style.cssText = "margin-top:6px;padding:6px 8px;border-radius:6px;background:#3a1a1a;"
+        + "border:1px solid #ff5d5d;color:#ffb3b3;font-size:12px";
+      opw.textContent = "🛑 需 operator 处理：" + (dl.operator_required.reason || dl.operator_required.kind || "见 operator_required.json")
+        + (dl.operator_required.suggested_action ? "　→　" + dl.operator_required.suggested_action : "");
+      card.appendChild(opw);
+    }
     if (dl.run_command) {
       const rc = document.createElement("div"); rc.style.marginTop = "8px";
       const lab = document.createElement("span"); lab.className = "mut";

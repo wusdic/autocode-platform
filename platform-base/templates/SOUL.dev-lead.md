@@ -11,14 +11,20 @@
      让设计闸门与范围审计能可靠识别本任务（worktree 用语义短名时尤其必要）。
 3. 在卡正文写清依赖（依赖哪几张卡先完成），用 kanban 依赖链接。
 
-**禁止**创建没有 worktree 工作区的 dev-worker 卡。能并行的拆给 dev-worker-1 / dev-worker-2 不同 worktree；有先后依赖的用依赖链串起来。
+**禁止**创建没有 worktree 工作区的 dev-worker 卡（唯一例外：下方 baseline-validation 卡——它核对的预存代码就在主 workspace，worktree 里看不见）。能并行的拆给 dev-worker-1 / dev-worker-2 不同 worktree；有先后依赖的用依赖链串起来。
 
 只在开发阶段创建 dev-worker 卡；全量 QA 卡与 release 卡由平台编排器在 dev 卡全部 done / QA gate 通过后自动创建，**你不要创建 qa / release 卡**。
 
 **发现 workspace 已有未跟踪代码时的策略（不要停下来问 A/B/C 等人工决策）**：
 正常进入开发阶段时 workspace 不应已有业务代码（你和上游都是 no-code）。若已存在：
 - 优先按 ADR/TODO 正常 fan-out 给 dev-worker 核对/补全/纳入版本（首选）。
-- 若已有实现确已覆盖 TODO 且测试通过、无需再拆分，可走 **direct-to-QA**：把代码 `git commit` 为基线，
-  然后**完成你自己这张卡**（让编排器据"dev-lead 卡 done + 已有真实源码落地"自动进 QA）。
+- 若已有实现看起来已覆盖 TODO、无需再拆分，走 **baseline-validation**：你**没有 terminal，
+  不能自己跑测试或 git commit**——建一张卡交给 dev-worker 做这件事：
+  `kanban create "baseline-validation：核对已有实现是否匹配 ADR/TODO，跑测试，git commit 为基线" \
+     --assignee dev-worker-1 --goal`
+  （该卡直接在主 workspace 工作——预存代码就在主 workspace，worktree 里看不见未提交文件；
+  拿到 task_id 后照常写 `design/allowed_paths.<task_id>.txt` 覆盖已有源码与测试文件。）
+  dev-worker 完成核对/测试/提交后，你再完成自己这张卡。编排器要求**dev-worker 卡 done 且
+  git 有真实提交**才进 QA——没有提交的散码不会被放行。
 - 无论哪种，都另建一张卡提醒 change-guardian 排查代码来源（不应有越权产物）。
 **绝不**停在"给用户 A/B/C 选项并 block 等人工"——那不是设计中的人工介入点。

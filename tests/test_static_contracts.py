@@ -561,3 +561,99 @@ def test_launcher_runs_model_preflight():
     pf = read("platform/check-models.sh")
     # 命中真实预检逻辑：打 chat/completions，区分硬错误(鉴权/模型名)与限流(429 不阻断)
     assert "chat/completions" in pf and "429" in pf
+
+
+# ============ 第十轮（两份外部报告核验后落地项）============================
+def test_r10_backend_selection_before_image_check():
+    # 报2 P0-3：后端选择必须在沙箱镜像检查之前，否则显式 local 降级被提前挡死
+    t = read("platform/launch_project.sh")
+    assert t.index('AUTOCODE_EXECUTOR_BACKEND="${AUTOCODE_EXECUTOR_BACKEND:-auto}"') \
+        < t.index("docker image inspect")
+    # 镜像检查仅 docker 后端才做
+    assert '"${EXECUTOR_BACKEND}" = "docker" ] && ! docker image inspect' in t
+
+
+def test_r10_requirements_validation():
+    # 报2 P0-1：confirm-plan 校验需求，拒绝占位（不静默写 "见对话记录"）
+    t = read("platform/control_plane.py")
+    assert "def parse_requirements" in t and "requirements_invalid" in t
+    assert "见对话记录\\nextended_need" not in t     # 旧占位写盘已移除
+
+
+def test_r10_dev_lead_no_self_commit():
+    # 报2 P0-2：dev-lead 无 terminal，不再被要求自己 commit/test；改建 baseline-validation 卡
+    soul = read("platform-base/templates/SOUL.dev-lead.md")
+    assert "baseline-validation" in soul and "没有 terminal" in soul
+    assert "把代码 `git commit` 为基线" not in soul   # 旧的自相矛盾指令已移除
+    orch = read("platform/orchestrator.py")
+    assert "baseline_validation_started" in orch
+    assert "commit_count_all(ws) > 1" in orch          # 进 QA 需真实提交
+
+
+def test_r10_audit_tail_and_rotation():
+    # 报1 P2-1/8.4：/audit seek 尾读；三个写入器 5MB 轮转
+    cp = read("platform/control_plane.py")
+    assert "fh.seek(size - 262144)" in cp and "_rotate_if_big" in cp
+    assert "5_000_000" in read("platform/orchestrator.py")
+    assert "5000000" in read("platform/audit_lib.sh")
+
+
+def test_r10_subprocess_timeouts_and_runtime_max():
+    # 报1 P2-2 修正版：真正风险是子进程无超时挂起持锁（tick_lock 本就非阻塞）
+    cp = read("platform/control_plane.py")
+    assert "HERMES_CMD_TIMEOUT" in cp                  # _run_checked 超时
+    assert "RuntimeMaxSec=600" in read("scripts/01-deploy-platform.sh")
+
+
+def test_r10_main_ws_observation_not_blocking():
+    # 报1 P1-1 降级版：主 ws 观测（信息性）——阻断版会误杀合法基线/合并提交
+    sg = read("platform/scope_guard.py")
+    assert "def main_workspace_findings" in sg
+    qi = read("platform/qa_integrity.py")
+    assert "main_workspace_findings" in qi
+    # integrity_block_ok 判定不含该字段（观测不阻断）
+    seg = qi.split("def integrity_block_ok")[1].split("def ")[0]
+    assert "main_workspace_findings" not in seg
+
+
+def test_r10_complete_archives_leftovers():
+    # 报1 P1-2 重设计：complete 时归档非 done 遗留卡（确定性时点，比猜 supersede 可靠）
+    assert "cancel_card" in read("platform/control_plane.py")
+    orch = read("platform/orchestrator.py")
+    assert "card_archived" in orch and 'getattr(self.gw, "cancel_card"' in orch
+
+
+def test_r10_watchdog_env_words_and_operator_required():
+    # 报2 P1-4：环境错误词覆盖 docker/daemon/权限；operator 必修状态落盘可显示
+    wd = read("platform/watchdog.sh")
+    assert "*docker*" in wd and "*daemon*" in wd and "*permission\\ denied*" in wd
+    assert "operator_required.json" in wd
+    assert "operator_required" in read("platform/control_plane.py")
+    assert "operator_required" in read("platform/webui.html")
+
+
+def test_r10_deliverable_unattended_metrics():
+    # 报2 P1-2 子集：可交付 ≠ 自然无人值守完成，指标可查
+    cp = read("platform/control_plane.py")
+    for k in ("is_unattended_done", "manual_interventions", "auto_repairs",
+              "operator_assisted"):
+        assert k in cp, k
+    html = read("platform/webui.html")
+    assert "自然无人值守完成" in html and "人工干预" in html
+
+
+def test_r10_apt_mirror_and_launch_canary():
+    # 报1 8.1（默认不改源的 APT_MIRROR）+ P2-3 降级版（可选后台金丝雀）
+    assert "APT_MIRROR" in read("docker/python-sandbox.Dockerfile")
+    assert "APT_MIRROR" in read("scripts/01-deploy-platform.sh")
+    lp = read("platform/launch_project.sh")
+    assert "AUTOCODE_LAUNCH_CANARY" in lp and "nohup" in lp
+    assert "hook_canary_failed" in read("platform/hook_canary.sh")
+
+
+def test_r10_verify_acceptance_covers_new_capabilities():
+    # 报2 P1-3 子集：验收脚本覆盖 worker profile/backend/provider/deliverable/audit
+    va = read("scripts/verify-acceptance.sh")
+    for k in ("worker_profiles", "executor_backend", "provider_status",
+              "unattended_completion", "audit_trail", "is_unattended_done"):
+        assert k in va, k
